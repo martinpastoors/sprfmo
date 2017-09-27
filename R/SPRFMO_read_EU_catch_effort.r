@@ -2,6 +2,7 @@
 # SPRFMO read EU catch effort
 #
 # 17/09/2017: first version, adapted from read_kenmerken
+# 21/09/2017: expanded to include GAM models for CPUE
 # ==================================================================
 
 # Reset lists
@@ -14,6 +15,7 @@ library(stringr)       # string manipulation
 library(pander)        # for tables
 library(reshape2)      # cast and melt dataframes
 library(broom)         # clean up statistics
+library(scales)        # pretty scales
 library(tidyverse)     # data manipulation and piping
 # library(gam)           # gam analysis
 library(mgcv)          # tensor spline for gam
@@ -50,6 +52,97 @@ ad <-
          desc     = "raw CPUE") %>% 
   data.frame()
 
+elnino <- 
+  read_excel(path="D:/SPRFMO/2017/data/elnino.xlsx", col_names = TRUE) %>% 
+  lowcase() %>% 
+  gather(key=month, value=ssf, m12:m11) %>% 
+  mutate(month = as.numeric(gsub("m","", month))) %>% 
+  mutate(ELE   = 0, 
+         ELE   = ifelse(ssf <= -0.5, -1, ELE),
+         ELE   = ifelse(ssf >= 0.5 ,  1, ELE)) %>% 
+  arrange(year, month)
+
+
+# -----------------------------------------------------------------------------------
+# read old haullists
+# -----------------------------------------------------------------------------------
+
+old.file.name  <- list.files(path = "data", recursive  = F, pattern    = "haullists", full.names = TRUE,  ignore.case= TRUE)
+oldlists <-
+  read_excel(old.file.name, 
+             sheet     = 1, 
+             col_names = FALSE, 
+             col_types = "text", 
+             range     = "A2:Z2000", # cell_cols("A:V"),
+             na        = "",
+             skip      = 2) %>% 
+  mutate  (
+    file    = old.file.name,
+    ws      = excel_sheets( old.file.name) )
+
+names(oldlists) <-  
+  c("vesselcountry","vesselname","vesselcallsign","vesselcode", "vesselimo", 
+    "shootdate","shoottime", "hauldate", "haultime","duration", 
+    "shootlat","shootlon","haullat","haullon",
+    "targetspecies","trawltype","trawltype2", 
+    "openingheight", "openingwidth", 
+    "geardepth","waterdepth","temperature", 
+    "cjm","mas", "oth", "marinemammalbycatch",
+    "filename", "worksheet")
+
+# convert to long format (catch is in tonnes)
+oldlists <-
+  oldlists %>% 
+  filter(!is.na(vesselcountry)) %>% 
+  mutate(
+    shootdate = ifelse(toupper(shootdate)=="NA",NA, shootdate),
+    shootdate = as.Date(as.numeric(shootdate), origin = "1899-12-30"),
+    shoottime = as.numeric(shoottime),
+    shoottime = ifelse(shoottime >= 1, shoottime/24, shoottime),
+   
+    hauldate  = ifelse(toupper(hauldate)=="NA",NA, hauldate),
+    hauldate  = as.Date(as.numeric(hauldate), origin = "1899-12-30"),
+    haultime  = as.numeric(haultime),
+    haultime  = ifelse(haultime >= 1, haultime/24, haultime),
+   
+    duration  = as.numeric(duration),
+    duration  = ifelse(is.na(duration) & !is.na(shoottime) & !is.na(haultime) & hauldate > shootdate, 
+                       1+haultime-shoottime, duration),
+    duration  = ifelse(is.na(duration) & !is.na(shoottime) & !is.na(haultime) & hauldate == shootdate, 
+                       haultime-shoottime, duration),
+    duration  = ifelse(duration==0, NA, duration),
+   
+    temperature = ifelse(temperature == "0", NA, temperature)
+  ) %>% 
+  gather(key=species, value=catch, cjm:oth) %>% 
+  mutate_at(vars(shootlat, shootlon, haullat, haullon, openingheight, openingwidth, 
+                 geardepth, temperature, catch), 
+            funs(as.numeric)) %>% 
+  mutate(
+    haullat       = ifelse(haullat == 0, NA, haullat),
+    haullon       = ifelse(haullon == 0, NA, haullon),
+    shootlat      = ifelse(shootlat > 0, -1*shootlat, shootlat),
+    shootlon      = ifelse(shootlon > 0, -1*shootlon, shootlon),
+    haullat       = ifelse(haullat > 0, -1*haullat, haullat),
+    haullon       = ifelse(haullon > 0, -1*haullon, haullon),
+    
+    year          = year(shootdate),
+    month         = month(shootdate),
+    day           = yday(shootdate)
+  ) %>% 
+  data.frame()
+
+# filter(oldlists, grepl("\\s+", shootlat)) %>% View()
+# filter(t, grepl("\\s+", shootlat)) %>% View()
+
+# count_not_na(oldlists)  
+# glimpse(oldlists)
+# sortunique(oldlists$duration)
+# sortunique(oldlists$temperature)
+# hist(oldlists$temperature)
+# hist(oldlists$shoottime)
+# filter(oldlists, haullon ==-8.4) %>% View()
+summary(oldlists)
 
 # ================================================================================
 # Reading the catch effort files
@@ -108,103 +201,96 @@ names(t) <-  c("vesselcountry","vesselname","vesselcallsign","vesselcode", "vess
                "species","catch","discarded", "filename", "worksheet")
 
 # filtering and manipulations
-t <- 
+newlists <- 
   t %>% 
   filter(!is.na(vesselcountry)) %>% 
   filter(!grepl("vessel",tolower(vesselcountry))) %>% 
   
   mutate(
-    catch         = gsub("\\s+", "",catch),
-    catch         = as.numeric(catch) / 1000, 
+    vesselcode    = gsub("\\s+|-", "", vesselcode),
+    vesselcallsign= gsub("\\.", "", toupper(vesselcallsign)),
+    species       = tolower(species),
+    
     shootdatetime = gsub("\\s+", "",toupper(shootdatetime)),
-    hauldatetime  = gsub("\\s+", "",toupper(hauldatetime)),
     shootdate     = substr(shootdatetime, 1, 11),
     shoottime     = substr(shootdatetime, 13, 20),
+    shoottime     = gsub(";", ":", shoottime), 
+    shoottime     = gsub("-", "0", shoottime),
+
+    hauldatetime  = gsub("\\s+", "",toupper(hauldatetime)),
     hauldate      = substr(hauldatetime, 1, 11),
-    haultime      = substr(hauldatetime, 13, 20)
+    haultime      = substr(hauldatetime, 13, 20),
+    haultime      = gsub(";",":", haultime), 
+
+    catch         = ifelse(is.na(catch)    , "0", gsub("\\s+", "", catch)),
+    catch         = as.numeric(catch) / 1000, 
+    
+    discarded     = ifelse(is.na(discarded), "0", gsub("\\s+", "", discarded)),
+    discarded     = as.numeric(discarded)
+    
   ) %>% 
-  mutate_at(c("shootdate","hauldate"), funs(lubridate::ymd)) %>%
+  
+  mutate_at(c("shootlat","shootlon","haullat","haullon",
+              "openingheight","openingwidth","geardepth"), funs(as.numeric))     %>% 
+  mutate_at(c("vesselcode","vesselname")                 , funs(tolower))        %>% 
+  mutate_at(c("shootdate","hauldate")                    , funs(lubridate::ymd)) %>%
+  # mutate_at(c("shoottime","haultime")                    , funs(lubridate::hms)) %>% 
+  
+  mutate(
+    species       = ifelse(is.na(species) & catch == 0, "cjm",species),
+    year          = year(shootdate),
+    month         = month(shootdate),
+    day           = yday(shootdate),
+    
+    st            = as.POSIXct(shoottime, format = "%H:%M:%S"),
+    shoottime     = (hour(st)*3600 + minute(st)*60 + second(st))/86400 ,
+    ht            = as.POSIXct(haultime, format = "%H:%M:%S"),
+    haultime      = (hour(ht)*3600 + minute(ht)*60 + second(ht))/86400 ,
+
+    duration      = ifelse(!is.na(shoottime) & !is.na(haultime) & hauldate > shootdate, 
+                           1+haultime-shoottime, NA),
+    duration      = ifelse(!is.na(shoottime) & !is.na(haultime) & hauldate == shootdate, 
+                           haultime-shoottime, duration),
+    duration      = ifelse(duration<=0, NA, duration),
+    
+    haullat       = ifelse(haullat == 0, NA, haullat),
+    haullon       = ifelse(haullon == 0, NA, haullon),
+    shootlat      = ifelse(shootlat > 0, -1*shootlat, shootlat),
+    shootlon      = ifelse(shootlon > 0, -1*shootlon, shootlon),
+    haullat       = ifelse(haullat > 0, -1*haullat, haullat),
+    haullon       = ifelse(haullon > 0, -1*haullon, haullon)
+  ) %>% 
+  select(-st,-ht) %>% 
   as.data.frame()
 
+count_not_na(newlists)  
+glimpse(newlists)
 
-# filter(t, year != year2) %>% View()
-
-
-
-# -----------------------------------------------------------------------------------
-# read old haullists
-# -----------------------------------------------------------------------------------
-
-old.file.name  <- list.files(path = "data", recursive  = F, pattern    = "haullists", full.names = TRUE,  ignore.case= TRUE)
-oldlists <-
-  read_excel(old.file.name, 
-             sheet     = j, 
-             col_names = FALSE, 
-             col_types = "text", 
-             range     = "A2:Z2000", # cell_cols("A:V"),
-             na        = "",
-             skip      = 2) %>% 
-  mutate  (
-    file    = old.file.name,
-    ws      = excel_sheets( old.file.name) )
-
-names(oldlists) <-  
-             c("vesselcountry","vesselname","vesselcallsign","vesselcode", "vesselimo", 
-               "shootdate","shoottime", "hauldate", "haultime","duration", 
-               "shootlat","shootlon","haullat","haullon",
-               "targetspecies","trawltype","trawltype2", 
-               "openingheight", "openingwidth", 
-               "geardepth","waterdepth","temperature", 
-               "cjm","mas", "oth", "marinemammalbycatch",
-               "filename", "worksheet")
-
-# convert to long format (catch is in tonnes)
-oldlists <-
-  oldlists %>% 
-  mutate(shootdate = ifelse(toupper(shootdate)=="NA",NA, shootdate),
-         shootdate = as.Date(as.numeric(shootdate), origin = "1899-12-30"),
-         hauldate  = ifelse(toupper(hauldate)=="NA",NA, hauldate),
-         hauldate  = as.Date(as.numeric(hauldate), origin = "1899-12-30") 
-         ) %>% 
-  gather(key=species, value=catch, cjm:oth) %>% 
-  filter(!is.na(vesselcountry)) %>% 
-  data.frame()
-
-# filter(oldlists, grepl("\\s+", shootlat)) %>% View()
-# filter(t, grepl("\\s+", shootlat)) %>% View()
+# sortunique(newlists$vesselcallsign)
+# sortunique(newlists$temperature)
+# hist(newlists$duration)
+# hist(newlists$shoottime)
+# hist(newlists$haultime)
+# hist(log(newlists$catch+1))
+# filter(newlists, grepl("20:3:",shoottime)) %>% View()
+# filter(newlists, duration <=0) %>% View()
+# filter(newlists, nchar(haultime)<8) %>% View()
+# hms(as.data.frame(sortunique(newlists$shoottime)), quiet = FALSE)
 
 # -----------------------------------------------------------------------------------
-# make cjm dataset. filter empty rows and rows with old header information
+# make cjm dataset. 
 # -----------------------------------------------------------------------------------
 
 factor <- 
-  data.frame(year=c(2005:2017), f =c(1,1,1.4, 1.5, 1.45, 1.5, 1.5, 1, 1,1, 1, 1, 1))
+  data.frame(year=c(2005:2017), f =c(1,1,1.4, 1.5, 1, 1, 1.5, 1, 1, 1, 1, 1, 1))
 
 cjm  <- 
-  rbind.all.columns(t, oldlists) %>% 
+  rbind.all.columns(oldlists, newlists) %>% 
   mutate(
     species       = toupper(species),
-    vesselcode    = gsub("\\s+|-", "", vesselcode),
-    # shootlat      = gsub("\\s+|-", "", shootlat),
-    # shootlon      = gsub("\\s+|-", "", shootlon),
-    discarded     = ifelse(is.na(discarded), "0", gsub("\\s+", "", discarded)),
-    discarded     = as.numeric(discarded),
-    catch         = ifelse(is.na(catch)    , "0", gsub("\\s+", "", catch)),
-    catch         = as.numeric(catch)
-  ) %>%
-  mutate_at(c("shootlat","shootlon","haullat","haullon"),funs(as.numeric)) %>% 
-  mutate_at(c("vesselcode","vesselname"),funs(tolower)) %>% 
-  mutate(
-    haullat  = ifelse(haullat == 0, NA, haullat),
-    haullon  = ifelse(haullon == 0, NA, haullon),
-    shootlat = ifelse(shootlat > 0, -1*shootlat, shootlat),
-    shootlon = ifelse(shootlon > 0, -1*shootlon, shootlon),
-    haullat  = ifelse(haullat > 0, -1*haullat, haullat),
-    haullon  = ifelse(haullon > 0, -1*haullon, haullon),
-    year     = year(shootdate),
-    day      = yday(shootdate),
-    month    = month(shootdate),
-    species  = ifelse(is.na(species) & catch == 0, "CJM",species)) %>% 
+    vesselcode    = gsub("\\s+|-", "", tolower(vesselcode)),
+    vesselname    = tolower(vesselname)
+  ) %>% 
   data.frame() %>% 
   
   filter(species == "CJM") %>% 
@@ -213,12 +299,37 @@ cjm  <-
   left_join(factor, by=c("year")) %>% 
   mutate(catch2 = catch * f) %>% 
   
+  # aggregate all catches as catches per day; average the positions for each day. 
+  group_by(vesselcountry, vesselname, vesselcallsign, vesselcode, vesselimo, 
+           filename, worksheet, shootdate, year, month, day) %>% 
+  summarise(catch       = sum(catch, na.rm=TRUE),
+            catch2      = sum(catch2, na.rm=TRUE), 
+            duration    = sum(duration, na.rm=TRUE),
+            shootlon    = mean(shootlon, na.rm=TRUE), 
+            shootlat    = mean(shootlat, na.rm=TRUE),
+            haullon     = mean(haullon, na.rm=TRUE),
+            haullat     = mean(haullat, na.rm=TRUE),
+            temperature = mean(temperature, na.rm=TRUE), 
+            geardepth   = mean(geardepth, na.rm=TRUE),
+            nhaul1      = n_distinct(shootdatetime, na.rm=TRUE),
+            nhaul2      = n_distinct(shoottime, na.rm=TRUE),
+            nhaul3      = n_distinct(shootdate, na.rm=TRUE), 
+            duration    = sum(duration, na.rm=TRUE)) %>% 
+  
+  mutate(cpue2     = ifelse(duration > 0, catch2/(24*duration), NA) ) %>% 
+  mutate(nhaul     = max(nhaul1, nhaul2, nhaul3)) %>% 
+  select(-nhaul1, -nhaul2, -nhaul3) %>% 
+  
   # add the engine power
   left_join(vessels, by="vesselname") %>% 
   
-  # log catches
+  # add the el nino data
+  left_join(elnino, by=c("year","month")) %>% 
+  
+  # log catch per day and catch per hour
   mutate(lcatch  = log(catch+1),
-         lcatch2 = log(catch2+1)) %>% 
+         lcatch2 = log(catch2+1),
+         lcpue2  = log(cpue2+1) ) %>% 
   
   # add course lat and long
   mutate( shootlat2   = 10 * as.integer(shootlat/10),
@@ -230,14 +341,23 @@ cjm  <-
   # add empty 2012 year
   # rbind.all.columns(., data.frame(year=2012, species="CJM", catch=NA, catch2=NA, lcatch=NA, lcatch2=NA)) %>% 
   
-  # ignore years prior to 2007
-  filter(year >= 2007)
+  # ignore years prior to 2006
+  filter(year >= 2007) %>% 
+  data.frame()
+
   
   
 
 save(cjm, file="rdata/eu_cjm.RData")
 # load(file="rdata/kenmerk_temp.RData")
 
+count_not_na(cjm)  
+glimpse(cjm)
+summary(cjm)
+# hist(cjm$year)
+# filter(cjm, is.na(species) & catch == 0) 
+# sortunique(cjm$species)
+# filter(cjm, species == "CJM") %>% ungroup() %>% summarise(n = n()) %>% View()
 # -------------------------------------------------------------------------------------
 # check vessels and year
 # -------------------------------------------------------------------------------------
@@ -256,12 +376,15 @@ group_by(cjm, year, day, vesselcode, vesselname) %>%
   # write.csv(., file="cjm by vessel and year.csv", row.names=FALSE)
 
 group_by(cjm, year, day, vesselcode, vesselname) %>% 
-  summarise(catch=sum(catch,na.rm=TRUE)) %>% 
+  summarise(catch=sum(catch,na.rm=TRUE),
+            catch2 = sum(catch2, na.rm=TRUE)) %>% 
   group_by(year, vesselcode, vesselname) %>% 
   summarise(catch = as.integer(sum(catch, na.rm=TRUE)),
+            catch2 = as.integer(sum(catch2, na.rm=TRUE)),
             days  = n_distinct(day)) %>% 
   group_by(year) %>% 
-  summarise(catch = (sum(catch, na.rm=TRUE)),
+  summarise(catch = sum(catch, na.rm=TRUE),
+            catch2 = sum(catch2, na.rm=TRUE),
             days  = sum(days, na.rm=TRUE)) %>% 
   View()
 
@@ -280,6 +403,15 @@ group_by(cjm, year, day, vesselname) %>%
   ggplot(aes(x=gt, y=cpue)) +
   geom_point()
 
+# export catch and effort by vessel, month and year relative to the absolute catch per year
+group_by(cjm, vesselname, year, month) %>% 
+  summarise(catch = as.integer(sum(catch, na.rm=TRUE)),
+            catch2= as.integer(sum(catch2,na.rm=TRUE)),
+            days  = n_distinct(shootdate)) %>% 
+  mutate(cpue=catch/days) %>% 
+  dcast(year + vesselname ~ month, value.var = "catch", sum, margins=c("month", "vesselname")) %>% 
+  write.csv(., file="pfa_fishingactivities in sprfmo.csv", na="", row.names=FALSE)
+
 
 # -------------------------------------------------------------------------------------
 # check data and positions
@@ -287,6 +419,8 @@ group_by(cjm, year, day, vesselname) %>%
 
 count_not_na(cjm)  
 count_na(cjm)  
+
+unique(cjm$duration)
 
 filter(cjm, !is.na(shootlat), is.na(shootlon)) %>% View()
 filter(cjm, is.na(shootlat), !is.na(shootlon)) %>% View()
@@ -307,24 +441,45 @@ cjm %>%
   View()
 
 
-# plot all catch
+# Check catch per day vs catch per hour
+cjm %>% 
+  ggplot(aes(x=lcatch2, y=lcpue2)) +
+  theme_publication() +
+  geom_point() +
+  facet_wrap(~vesselname)
+
+cjm %>% 
+  ggplot(aes(x=shootdate, y=lcatch2)) +
+  theme_publication() +
+  geom_point(colour="blue", alpha=0.5) +
+  geom_point(aes(y=lcpue2), colour="red", alpha=0.5) +
+  facet_wrap(~vesselname)
+# -------------------------------------------------------------------------------------
+# plot all catch per day positions by vessel
+# -------------------------------------------------------------------------------------
+
 cjm %>% 
   ggplot(aes(x=shootlon, y=shootlat)) +
   theme_publication() +
-  theme(axis.title = element_blank()) +
+  theme(axis.title = element_blank(), 
+        legend.position = "none") +
   coord_quickmap(xlim=c(-120,-50) , ylim=c(-90,-10)) +
-  # coord_quickmap(xlim=range(cpue$shootlon, na.rm=TRUE) , 
-  #               ylim=range(cpue$shootlat, na.rm=TRUE)) +
   geom_polygon(data=fao.df,   aes(long, lat, group=group), fill = NA,
                size=0.25, color="gray60", alpha=0.3) +
-  geom_point(size=2, colour="blue", alpha=0.3) +
+  geom_jitter(aes(colour=vesselname), size=0.8, alpha=0.5) +
   facet_wrap(~year, drop=FALSE, ncol=5)
 
 # -------------------------------------------------------------------------------------
-# plot cjm catch per haul
+# plot cjm catch per day
 # -------------------------------------------------------------------------------------
 
 cjm %>% 
+  group_by(vesselname, year, day) %>% 
+  summarise(catch = sum(catch, na.rm=TRUE), 
+            catch2 = sum(catch2, na.rm=TRUE), 
+            shootlat = mean(shootlat, na.rm=TRUE), 
+            shootlon = mean(shootlon, na.rm=TRUE)) %>% 
+  
   ggplot(aes(x=shootlon, y=shootlat)) +
   theme_publication() +
   theme(axis.title = element_blank()) +
@@ -334,239 +489,219 @@ cjm %>%
   geom_polygon(data=fao.df,   aes(long, lat, group=group), fill = NA,
                size=0.25, color="gray60", alpha=0.3) +
   geom_point(aes(size=catch), colour="blue", alpha=0.3) +
-  facet_wrap(~year, drop=FALSE, ncol=5)
+  facet_wrap(~year, drop=FALSE, ncol=4)
 
-cjm %>% 
+# -------------------------------------------------------------------------------------
+# plot cjm catch per day per rect
+# -------------------------------------------------------------------------------------
+
+t <- 
+  cjm %>% 
+  data.frame() %>% 
+  filter(!is.na(shootlon)) %>% 
+  filter(!is.na(shootlat)) %>% 
+  mutate(rect = encode_zchords(x=shootlon, y=shootlat, dx = 1, dy = 0.5) ) %>% 
+
+  group_by(vesselname, year, day, rect) %>% 
+  summarise(catch  = sum(catch, na.rm=TRUE), 
+            catch2 = sum(catch2, na.rm=TRUE)) %>% 
+  group_by(year, rect) %>% 
+  summarise(catch  = mean(catch, na.rm=TRUE), 
+            catch2 = mean(catch2, na.rm=TRUE)) %>% 
+  separate(rect, c("shootlon", "shootlat"), sep = ":", convert = TRUE, remove = FALSE) %>% 
+  
+  ungroup()
+
+
+b <- 
+  log_breaks(n=7)(c(1,max(select(t, catch), na.rm=TRUE))) 
+
+td <-
+  t %>% 
+  mutate(catch = cut(catch,breaks=b, include.lowest=T, dig.lab=10) ) %>% 
+  mutate(catch2= cut(catch2,breaks=b, include.lowest=T, dig.lab=10) ) %>% 
+  filter(!is.na(catch))
+
+td %>% 
   ggplot(aes(x=shootlon, y=shootlat)) +
   theme_publication() +
-  theme(axis.title = element_blank()) +
+  labs(x = NULL, y = NULL) +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        text             = element_text(size=12),
+        legend.key.width  = unit(1, "cm")
+  ) +  
+  
   coord_quickmap(xlim=c(-120,-50) , ylim=c(-50,-10)) +
-  # coord_quickmap(xlim=range(cpue$shootlon, na.rm=TRUE) , 
-  #               ylim=range(cpue$shootlat, na.rm=TRUE)) +
   geom_polygon(data=fao.df,   aes(long, lat, group=group), fill = NA,
                size=0.25, color="gray60", alpha=0.3) +
-  geom_jitter(aes(colour=vesselcode), alpha=0.3, size=1) +
-  facet_wrap(~year, drop=FALSE, ncol=5) +
-  guides(colour="none")
-
-# -------------------------------------------------------------------------------------
-# prepare data for cpue analysis
-# -------------------------------------------------------------------------------------
-
-# select areas to be included (more than x observations)
-selected_areas <-
-  cjm %>% 
-  group_by(shootlat2, shootlon2) %>% 
-  summarise(nobs = n()) %>% 
-  filter(nobs > 100) %>% 
-  select(shootlat2, shootlon2)
-
-cjm2 <-
-  selected_areas %>% 
-  left_join(cjm, by=c("shootlat2","shootlon2")) %>% 
-  group_by(vesselcode, vesselname, year, month, day, area, shootlat2, shootlon2, species) %>% 
-  summarise(catch  = sum(catch, na.rm=TRUE),
-            catch2 = sum(catch2, na.rm=TRUE),
-            nhaul1 = n_distinct(shootdatetime, na.rm=TRUE),
-            nhaul2 = n_distinct(shoottime, na.rm=TRUE),
-            nhaul3 = n_distinct(shootdate, na.rm=TRUE)) %>% 
-  mutate(nhaul   = max(nhaul1, nhaul2, nhaul3)) %>% 
-  ungroup() %>% 
-  mutate(lcatch  = log(catch+1),
-         lcatch2 = log(catch2+1),
-         year    = as.integer(year) ) %>% 
-  select(-(nhaul1:nhaul3))
-
+  geom_tile(aes(shootlon, shootlat, fill = catch), colour=NA, alpha=1.0) +
+  scale_fill_brewer(palette = "YlOrRd") + 
+  facet_wrap(~year, drop=FALSE, ncol=4)
 
 # -------------------------------------------------------------------------------------
 # plot CPUE trends by vessel
 # -------------------------------------------------------------------------------------
 
 m <-
-  cjm2 %>% 
-  filter(year != 2012) %>% 
+  cjm %>% 
+  # filter(year != 2012) %>% 
   group_by(year) %>%
-  summarise(lcatch2 = mean(lcatch2, na.rm=TRUE)) %>% 
-  mutate(date = as.numeric(year) + 0.5) 
+  summarise(lcatch2 = mean(lcatch2, na.rm=TRUE), 
+            day     = mean(day, na.rm=TRUE)) %>% 
+  mutate(date = as.numeric(year) + day/365) %>% 
+  data.frame() %>% 
+  rbind.all.columns (data.frame(year=2012))
   
-cjm2 %>% 
+cjm %>% 
   mutate(date = year + day/365) %>% 
-  ggplot(aes(date, lcatch2, group=area)) +
+  ggplot(aes(date, lcatch2)) +
   theme_publication() +
   theme(legend.position="none")+
   geom_jitter(aes(colour=vesselcode)) +
-  geom_line(data=m, aes(date, lcatch2), colour="gray20", linetype="dashed", size=1, inherit.aes = FALSE) 
+  geom_line(data=m, aes(date, lcatch2), colour="gray20", linetype="dashed", size=1) +
+  geom_point(data=m, aes(date, lcatch2)) +
+  scale_x_continuous(breaks=seq(2005, 2017, by = 5)) 
+  
   
 # -------------------------------------------------------------------------------------
 # plot CPUE trends by area (as lcatch or lcatch2)
 # -------------------------------------------------------------------------------------
 
 m <-
-  cjm2 %>% 
+  cjm %>% 
   filter(year != 2012) %>% 
   filter(lcatch >= 0.001) %>% 
+  filter(shootlat2 %in% c(-20, -30, -40)) %>% 
   filter(!grepl("NA", area)) %>% 
   group_by(year, area, shootlat2, shootlon2) %>%
   summarise(lcatch = mean(lcatch, na.rm=TRUE)) %>% 
   mutate(date = as.numeric(year) + 0.5) 
 
-cjm2 %>% 
+cjm %>% 
   filter(!grepl("NA", area)) %>% 
   filter(lcatch >= 0.001) %>% 
+  filter(shootlat2 %in% c(-20, -30, -40)) %>% 
   mutate(date = year + day/365) %>% 
   mutate(shootlat2 = factor(shootlat2, levels = c("-20", "-30", "-40"))) %>% 
-  
+  # group_by(shootlat2) %>% filter(row_number() ==1) %>% select(shootlat2) %>% View()
+
   ggplot(aes(date, lcatch, group=area)) +
   theme_publication() +
   theme(legend.position="none") +
-  geom_jitter(aes(colour=area), alpha=0.5) +
-  geom_line(data=m, aes(x=date, y=lcatch, colour=area), linetype="dashed", size=1, inherit.aes = FALSE) +
+  geom_jitter(colour="lightblue", alpha=0.5) +
+  geom_line(data=m, aes(x=date, y=lcatch), colour="gray20", linetype="dashed", size=1, inherit.aes = FALSE) +
   scale_x_continuous(breaks = seq(2005, 2017, by = 5)) +
   facet_grid((shootlat2)~shootlon2)
-
-# -------------------------------------------------------------------------------------
-
-m <-
-  cjm2 %>% 
-  filter(year != 2012) %>% 
-  filter(lcatch2 >= 0.001) %>% 
-  filter(!grepl("NA", area)) %>% 
-  group_by(year, area, shootlat2, shootlon2) %>%
-  summarise(lcatch2 = mean(lcatch2, na.rm=TRUE)) %>% 
-  mutate(date = as.numeric(year) + 0.5) 
-
-cjm2 %>% 
-  filter(!grepl("NA", area)) %>% 
-  filter(lcatch2 >= 0.001) %>% 
-  mutate(date = year + day/365) %>% 
-  mutate(shootlat2 = factor(shootlat2, levels = c("-20", "-30", "-40"))) %>% 
-  
-  ggplot(aes(date, lcatch2, group=area)) +
-  theme_publication() +
-  theme(legend.position="none") +
-  geom_jitter(aes(colour=area), alpha=0.5, shape=16) +
-  geom_line(data=m, aes(x=date, y=lcatch2, colour=area), linetype="dashed", size=1, inherit.aes = FALSE) +
-  scale_x_continuous(breaks = seq(2005, 2017, by = 5)) +
-  facet_grid((shootlat2)~shootlon2)
-
-# -------------------------------------------------------------------------------------
-# GLM modelling
-# -------------------------------------------------------------------------------------
-
-head(cjm2)
-
-# how to deal with zero catches?
-# what is the intercept referring to.
-
-# models including different variables 
-summary(glm0 <- glm(round(catch2)~1, family="poisson", 
-                    data=cjm2[cjm2$year >= 2007,]))
-summary(glm1 <- glm(round(catch2)~as.factor(year), family="poisson", 
-                    data=cjm2))
-summary(glm2 <- glm(round(catch2)~as.factor(year)+vesselname, family="poisson", 
-                    data=cjm2))
-summary(glm3 <- glm(round(catch2)~as.factor(year)+vesselname+area, family="poisson", 
-                    data=cjm2[cjm2$year >= 2007,]))
-
-glm3a <- tidy(glm3)
-
-glm3a %>% 
-  filter(grepl("year",term)) %>% 
-  ungroup() %>% 
-  mutate(rel_est = estimate/mean(estimate, na.rm=TRUE)) %>% 
-  mutate(year = as.numeric(gsub("as.factor(year)","", term, fixed=TRUE))) %>% 
-  ggplot(aes(year, (estimate))) +
-  geom_line() +
-  geom_point() +
-  scale_x_continuous(breaks = seq(2005, 2017, by = 5)) 
-  
-
-
 
 
 # -------------------------------------------------------------------------------------
 # GAM modelling
 # -------------------------------------------------------------------------------------
 
+
+
 # different models with increasing complexity
-gam0  <- gam(lcatch2 ~ as.factor(year)                                         , data=cjm)
-gam0a <- gam(lcatch  ~ as.factor(year)                                         , data=cjm)
-gam1  <- gam(lcatch2 ~ as.factor(year) + vesselname                            , data=cjm)
-gam2  <- gam(lcatch2 ~ as.factor(year) + gt                                    , data=cjm)
-gam3  <- gam(lcatch2 ~ as.factor(year) + vesselname + te(shootlon,shootlat,k=5), data=cjm)
-gam4  <- gam(lcatch2 ~ as.factor(year) + vesselname + month                    , data=cjm)
-gam5  <- gam(lcatch2 ~ as.factor(year) + gt + month                            , data=cjm)
-gam6  <- gam(lcatch2 ~ as.factor(year) + gt + month + shootlat2                , data=cjm)
-gam7  <- gam(lcatch2 ~ as.factor(year) + gt + month + te(shootlat,k=5)         , data=cjm)
+gam00 <- gam(lcatch2 ~ as.factor(year)                                          , data=cjm)
+gam00a<- gam(lcatch  ~ as.factor(year)                                          , data=cjm)
+gam01 <- gam(lcatch2 ~ as.factor(year) + vesselname                             , data=cjm)
+gam02 <- gam(lcatch2 ~ as.factor(year) + gt                                     , data=cjm)
+gam03 <- gam(lcatch2 ~ as.factor(year) + vesselname + te(shootlon,shootlat,k=5) , data=cjm)
+gam04 <- gam(lcatch2 ~ as.factor(year) + vesselname + month                     , data=cjm)
+gam05 <- gam(lcatch2 ~ as.factor(year) + gt + month                             , data=cjm)
+gam06 <- gam(lcatch2 ~ as.factor(year) + gt + month + shootlat2                 , data=cjm)
+gam07 <- gam(lcatch2 ~ as.factor(year) + gt + month + te(shootlat,k=5)          , data=cjm)
+gam08 <- gam(lcatch2 ~ as.factor(year) + gt + month + te(shootlon, shootlat,k=5), data=cjm)
+gam09 <- gam(lcatch2 ~ as.factor(year) + gt + month + ELE                       , data=cjm)
+gam10 <- gam(lcatch2 ~ as.factor(year) + vesselname + ELE                       , data=cjm)
+gam11 <- gam(lcpue2  ~ as.factor(year) + vesselname + ELE                       , data=cjm)
 
 # create predictor datasets
-gam0_pred  <-   expand.grid(year       = unique(cjm$year)) 
-gam0a_pred <-   expand.grid(year       = unique(cjm$year)) 
-gam1_pred  <-   expand.grid(year       = unique(cjm$year),
+gam00_pred  <-   expand.grid(year       = unique(cjm$year)) 
+gam00a_pred <-   expand.grid(year       = unique(cjm$year)) 
+gam01_pred  <-   expand.grid(year       = unique(cjm$year),
                             vesselname = cjm$vesselname[1]) 
-gam2_pred  <-   expand.grid(year       = unique(cjm$year),
+gam02_pred  <-   expand.grid(year       = unique(cjm$year),
                             gt         = cjm$gt[1]) 
-gam3_pred  <-   expand.grid(year       = unique(cjm$year),
+gam03_pred  <-   expand.grid(year       = unique(cjm$year),
                             vesselname = cjm$vesselname[1],
                             shootlon   = cjm$shootlon[1],
                             shootlat   = cjm$shootlat[1]) 
-gam4_pred  <-   expand.grid(year       = unique(cjm$year),
+gam04_pred  <-   expand.grid(year       = unique(cjm$year),
                             vesselname = cjm$vesselname[1],
                             month      = cjm$month[1]) 
-gam5_pred  <-   expand.grid(year       = unique(cjm$year),
+gam05_pred  <-   expand.grid(year       = unique(cjm$year),
                             gt         = cjm$gt[1],
                             month      = cjm$month[1]) 
-gam6_pred  <-   expand.grid(year       = unique(cjm$year),
+gam06_pred  <-   expand.grid(year       = unique(cjm$year),
                             gt         = cjm$gt[1],
                             month      = cjm$month[1],
                             shootlat2  = cjm$shootlat2[1])
-gam7_pred  <-   expand.grid(year       = unique(cjm$year),
+gam07_pred  <-   expand.grid(year       = unique(cjm$year),
                             gt         = cjm$gt[1],
                             month      = cjm$month[1],
                             shootlat   = cjm$shootlat[1])
+gam08_pred  <-   expand.grid(year       = unique(cjm$year),
+                            gt         = cjm$gt[1],
+                            month      = cjm$month[1],
+                            shootlat   = cjm$shootlat[1],
+                            shootlon   = cjm$shootlon[1])
+gam09_pred  <-   expand.grid(year       = unique(cjm$year),
+                            gt         = cjm$gt[1],
+                            month      = cjm$month[1],
+                            ELE        = cjm$ELE[1])
+gam10_pred <-   expand.grid(year       = unique(cjm$year),
+                            vesselname = cjm$vesselname[1],
+                            ELE        = cjm$ELE[1])
+gam11_pred <-   expand.grid(year       = unique(cjm$year),
+                            vesselname = cjm$vesselname[1],
+                            ELE        = cjm$ELE[1])
 
 
 # predict
-gam0_pred$pred  <- exp(predict(gam0,  newdata=gam0_pred, type="response" ))
-gam0a_pred$pred <- exp(predict(gam0a, newdata=gam0a_pred, type="response" ))
-gam1_pred$pred  <- exp(predict(gam1,  newdata=gam1_pred, type="response" ))
-gam2_pred$pred  <- exp(predict(gam2,  newdata=gam2_pred, type="response" ))
-gam3_pred$pred  <- exp(predict(gam3,  newdata=gam3_pred, type="response" ))
-gam4_pred$pred  <- exp(predict(gam4,  newdata=gam4_pred, type="response" ))
-gam5_pred$pred  <- exp(predict(gam5,  newdata=gam5_pred, type="response" ))
-gam6_pred$pred  <- exp(predict(gam6,  newdata=gam6_pred, type="response" ))
-gam7_pred$pred  <- exp(predict(gam7,  newdata=gam7_pred, type="response" ))
+gam00_pred$pred  <- exp(predict(gam00,  newdata=gam00_pred, type="response" ))
+gam00a_pred$pred <- exp(predict(gam00a, newdata=gam00a_pred, type="response" ))
+gam01_pred$pred  <- exp(predict(gam01,  newdata=gam01_pred, type="response" ))
+gam02_pred$pred  <- exp(predict(gam02,  newdata=gam02_pred, type="response" ))
+gam03_pred$pred  <- exp(predict(gam03,  newdata=gam03_pred, type="response" ))
+gam04_pred$pred  <- exp(predict(gam04,  newdata=gam04_pred, type="response" ))
+gam05_pred$pred  <- exp(predict(gam05,  newdata=gam05_pred, type="response" ))
+gam06_pred$pred  <- exp(predict(gam06,  newdata=gam06_pred, type="response" ))
+gam07_pred$pred  <- exp(predict(gam07,  newdata=gam07_pred, type="response" ))
+gam08_pred$pred  <- exp(predict(gam08,  newdata=gam08_pred, type="response" ))
+gam09_pred$pred  <- exp(predict(gam09,  newdata=gam09_pred, type="response" ))
+gam10_pred$pred  <- exp(predict(gam10, newdata=gam10_pred,type="response" ))
+gam11_pred$pred  <- exp(predict(gam11, newdata=gam11_pred,type="response" ))
 
-gam0_pred  <- rbind.all.columns(gam0_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam0", desc="null")
-gam0a_pred <- rbind.all.columns(gam0a_pred, data.frame(year=2012, pred=NA)) %>% mutate(model="gam0a",desc="null unraised")
-gam1_pred  <- rbind.all.columns(gam1_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam1", desc="vessel")
-gam2_pred  <- rbind.all.columns(gam2_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam2", desc="GT")
-gam3_pred  <- rbind.all.columns(gam3_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam3", desc="vessel+spatial")
-gam4_pred  <- rbind.all.columns(gam4_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam4", desc="vessel+month")
-gam5_pred  <- rbind.all.columns(gam5_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam5", desc="gt+month")
-gam6_pred  <- rbind.all.columns(gam6_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam6", desc="gt+month+lat")
-gam7_pred  <- rbind.all.columns(gam7_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam7", desc="gt+month+spatial lat")
-
-# plot
-ggplot(gam0_pred,  aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
-ggplot(gam0a_pred, aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
-ggplot(gam1_pred,  aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
-ggplot(gam2_pred,  aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
-ggplot(gam3_pred,  aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
-ggplot(gam4_pred,  aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
-ggplot(gam5_pred,  aes(year, pred)) +  geom_point() + geom_line() + expand_limits(y=0) + scale_x_continuous(breaks=seq(2005, 2017, by = 5))
+gam00_pred  <- rbind.all.columns(gam00_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam00", desc="null")
+gam00a_pred <- rbind.all.columns(gam00a_pred, data.frame(year=2012, pred=NA)) %>% mutate(model="gam00a",desc="null unraised")
+gam01_pred  <- rbind.all.columns(gam01_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam01", desc="vessel")
+gam02_pred  <- rbind.all.columns(gam02_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam02", desc="GT")
+gam03_pred  <- rbind.all.columns(gam03_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam03", desc="vessel+spatial lat lon")
+gam04_pred  <- rbind.all.columns(gam04_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam04", desc="vessel+month")
+gam05_pred  <- rbind.all.columns(gam05_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam05", desc="gt+month")
+gam06_pred  <- rbind.all.columns(gam06_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam06", desc="gt+month+lat")
+gam07_pred  <- rbind.all.columns(gam07_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam07", desc="gt+month+spatial lat")
+gam08_pred  <- rbind.all.columns(gam08_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam08", desc="gt+month+spatial lat lon")
+gam09_pred  <- rbind.all.columns(gam09_pred , data.frame(year=2012, pred=NA)) %>% mutate(model="gam09", desc="gt+month+ELE")
+gam10_pred  <- rbind.all.columns(gam10_pred, data.frame(year=2012, pred=NA)) %>% mutate(model="gam10",desc="vesselname+ELE")
+gam11_pred  <- rbind.all.columns(gam11_pred, data.frame(year=2012, pred=NA)) %>% mutate(model="gam11",desc="cpue vs vesselname+ELE")
 
 # combine and plot
 gam_comb <- 
-  rbind.all.columns(gam0_pred, gam0a_pred) %>% 
-  rbind.all.columns(., gam1_pred) %>% 
-  rbind.all.columns(., gam2_pred) %>% 
-  rbind.all.columns(., gam3_pred) %>% 
-  rbind.all.columns(., gam4_pred) %>% 
-  rbind.all.columns(., gam5_pred) %>% 
-  rbind.all.columns(., gam6_pred) %>% 
-  rbind.all.columns(., gam7_pred) %>% 
-  rbind.all.columns(., select(ad, year, pred=cpue, desc, model))
+  rbind.all.columns(gam00_pred, gam00a_pred) %>% 
+  rbind.all.columns(., gam01_pred) %>% 
+  rbind.all.columns(., gam02_pred) %>% 
+  rbind.all.columns(., gam03_pred) %>% 
+  rbind.all.columns(., gam04_pred) %>% 
+  rbind.all.columns(., gam05_pred) %>% 
+  rbind.all.columns(., gam06_pred) %>% 
+  rbind.all.columns(., gam07_pred) %>% 
+  rbind.all.columns(., gam08_pred) %>% 
+  rbind.all.columns(., gam09_pred) %>% 
+  rbind.all.columns(., gam10_pred) %>% 
+  rbind.all.columns(., gam11_pred) %>% 
+  rbind.all.columns(., select(ad, year, pred=cpue, desc, model)) 
 
 ggplot(gam_comb, aes(x=year, y=pred)) +
   theme_publication() +
@@ -577,16 +712,20 @@ ggplot(gam_comb, aes(x=year, y=pred)) +
   facet_wrap(~model, scales="free_y")
 
 # statistics checks
-gam.check(gam1); summary(gam1); anova(gam1); AIC(gam1)
-gam.check(gam2); summary(gam2); anova(gam2); AIC(gam2)
-gam.check(gam3); summary(gam3); anova(gam3); AIC(gam3)
-gam.check(gam4); summary(gam4); anova(gam4); AIC(gam4)
-gam.check(gam5); summary(gam5); anova(gam5); AIC(gam5)
-gam.check(gam6); summary(gam6); anova(gam6); AIC(gam6)
-AIC(c(gam4, gam3))
+gam.check(gam01); summary(gam01); anova(gam01); AIC(gam01)
+gam.check(gam02); summary(gam02); anova(gam02); AIC(gam02)
+gam.check(gam03); summary(gam03); anova(gam03); AIC(gam03)
+gam.check(gam04); summary(gam04); anova(gam04); AIC(gam04)
+gam.check(gam05); summary(gam05); anova(gam05); AIC(gam05)
+gam.check(gam06); summary(gam06); anova(gam06); AIC(gam06)
+gam.check(gam07); summary(gam07); anova(gam07); AIC(gam07); plot(gam07, all.terms=T)
+gam.check(gam08); summary(gam08); anova(gam08); AIC(gam08); plot(gam08, all.terms=T)
+gam.check(gam09); summary(gam09); anova(gam09); AIC(gam09); plot(gam09, all.terms=T)
+
 
 # AIC criteria
-models <- c("gam0", "gam0a","gam1","gam2","gam3","gam4","gam5","gam6", "gam7")
+models <- c("gam00", "gam00a","gam01","gam02","gam03","gam04","gam05","gam06", "gam07", 
+            "gam08", "gam09","gam10", "gam11")
 desc   <- gam_comb %>% filter(year=="2015") %>% select(model, desc) %>% filter(model != "cpue")
 aic    <- matrix(NA, nrow=length(models), ncol=1, dimnames=list(name=models, "AIC"))
 
@@ -600,11 +739,63 @@ aic <-
   rename(model=rowname) %>% 
   left_join(desc, by=c("model"))
 
+View(aic)
 
-cjm %>% 
-  group_by(year) %>% 
-  summarize(lcatch = mean(lcatch, na.rm=TRUE),
-            lcatch2= mean(lcatch2,na.rm=TRUE)) %>% 
-  ggplot(aes(x=year)) +
-  geom_line(aes(y=lcatch), colour="red") +
-  geom_line(aes(y=lcatch2), colour="blue")
+scale_this <- function(x){
+  (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+
+gam_comb %>% 
+  group_by(model) %>% 
+  mutate(pred2 = scale_this(pred)) %>% 
+  ggplot(aes(year, pred2)) +
+  theme_publication() +
+  theme(legend.position="none") +
+  geom_line(aes(colour=model)) +
+  geom_point() +
+  scale_x_continuous(breaks=seq(2005, 2017, by = 5)) +
+  facet_wrap(~model)
+
+
+
+
+# check the gam model
+set.seed(1)
+dat <- gamSim(1,n=400,scale=2)
+
+## fit a GAM with quite low `k'
+b <- gam(y~s(x0,k=6) + s(x1,k=6) + s(x2,k=6) + s(x3,k=6), data=dat)
+plot(b,pages=1,residuals=TRUE) ## hint of a problem in s(x2)
+
+b2 <- gam( y ~ s(x0) + te(x1,x2,k=4) + s(x3), data=dat)
+rsd <- residuals(b2)
+gam(rsd ~ s (x0,k=40,bs="cs"),gamma=1.4,data=dat) ## fine
+gam(rsd ~ te(x1,x2,k=10,bs="cs"),gamma=1.4,data=dat) 
+gam(rsd ~ s (x3,k=40,bs="cs"),gamma=1.4,data=dat) ## fine
+gam.check(b2) ## shows same problem
+
+set.seed(0)
+dat <- gamSim(1,n=400,scale=2)
+b <- gam(y~s(x0,k=6)+s(x1,k=6)+s(x2,k=6)+s(x3,k=6), data=dat,method="REML")
+gam.check(b)
+b
+
+## edf for 3rd smooth is highest as proportion of k -- increase k
+b <- gam(y~s(x0,k=6)+s(x1,k=6)+s(x2,k=12)+s(x3,k=6),
+         data=dat,method="REML")
+gam.check(b)
+b
+
+## edf substantially up, -ve REML substantially down
+b <- gam(y~s(x0,k=6)+s(x1,k=6)+s(x2,k=24)+s(x3,k=6),
+         data=dat,method="REML")
+gam.check(b)
+b
+
+## slight edf increase and -ve REML change
+b <- gam(y~s(x0,k=6)+s(x1,k=6)+s(x2,k=40)+s(x3,k=6),
+         data=dat,method="REML")
+gam.check(b)
+b
+
+## defintely stabilized (but really k around 20 would have been fine
