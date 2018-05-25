@@ -1,0 +1,762 @@
+---
+output: 
+  word_document:
+    reference_docx:  ../PFA_report_template_v1.4.dotx
+---
+
+```{r setup, include=FALSE}
+
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE,	message = FALSE,	warning = FALSE,	comment = "",	crop = TRUE )
+knitr::opts_chunk$set(fig.width=6) 
+knit_hooks$set(crop = hook_pdfcrop)
+
+# ---------------------------------------------------------------------------------------
+# Jack mackerel CPUE analysis for offshore fleet in SPRFMO area (EU, Russia, Vanuatu, Korea)
+#
+# 23/09/2017 First coding of the CPUE analysis
+# 08/05/2018 Added the fleets of Russia, Vanuatu and Korea
+# 23/05/2018 Added data quality checking
+# ---------------------------------------------------------------------------------------
+
+rm(list=ls())
+
+options(max.print=1000000)
+
+# Libraries
+library(rmarkdown)     # rmarkdown functionality
+library(pander)        # tables
+library(lubridate)     # data handling
+library(reshape2)      # reshaping data; e.g. cast
+library(readxl)        # excel reader
+library(broom)         # clean up statistics
+library(scales)        # pretty scales
+library(stringr)       # string manipulations
+library(tidyverse)     # combined package of dplyr, tidyr, ggplot, readr, purrr and tibble
+library(mgcv)          # tensor spline for gam
+
+# default settings for tables
+panderOptions('table.alignment.default', function(df) ifelse(sapply(df, is.numeric), 'right', 'left'))
+
+# set onedrive directory
+onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF') 
+
+# load spatial data
+load(file.path(onedrive,"rdata/world.df.RData"))
+load(file.path(onedrive,"rdata/fao.df.RData"))
+# load(file.path(onedrive,"rdata/eez.df.RData"))
+# load(file.path(onedrive,"rdata/fao.RData"))
+# load(file.path(onedrive,"rdata/eez.RData"))
+
+# Source my personal utilities
+source("../../prf/r/my utils.R")
+source("../../gisland/r/geo_inside.R")
+
+# Load EU data and do some manipulations
+offshore_eu <- 
+  get(load(file="d:/sprfmo/2018/rdata/offshore_eu2005_2017.RData")) 
+
+
+# Now read the other offshore fleets data
+offshore_noneu <-
+  read_excel(
+    path = "D:/SPRFMO/2018/data/CPUE/SPRFMO OffshorefleetsOct2017_sansEU.XLSX",
+    sheet     = "Offshore FA data07_16 sans EU", 
+    col_names = TRUE,
+    col_types = "text",
+    range     = "D1:X18960"
+  ) %>% 
+  lowcase() %>% 
+  rename(
+    vesselcallsign = callsign, 
+    vesselcode     = registrationnumber,
+    vesselimo      = imonumber,
+    vesselcountry  = flag,
+    shootdatetime  = startdate,
+    hauldatetime   = enddate,
+    shootlat       = startlatitude,
+    shootlon       = startlongitude,
+    haullat        = endlatitude,
+    haullon        = endlongitude,
+    species        = caughtspeciescode,
+    catch          = retainedspecieston
+  ) %>% 
+  
+  # change variabele type
+  mutate_at(c("shootlat","shootlon",
+              "haullat","haullon", "catch"), funs(as.numeric)) %>% 
+  
+  # specific modifications of variables
+  mutate(
+    shootdatetime2 = ifelse(grepl("^[0-9]{4}-", shootdatetime), shootdatetime, NA),
+    shootdatetime2 = ymd_hms(shootdatetime2),
+    shootdatetime1 = ifelse(grepl("^[0-9]{4}-", shootdatetime), NA, shootdatetime),
+    shootdatetime1 = as.POSIXct(as.numeric(shootdatetime1) * (60*60*24), 
+                                origin="1899-12-30", tz="GMT"),
+    shootdatetime = ifelse(!is.na(shootdatetime2), shootdatetime2, shootdatetime1),
+    shootdatetime = as.POSIXct(as.numeric(shootdatetime), tz="GMT", origin="1970-01-01"),
+
+    hauldatetime2 = ifelse(grepl("^[0-9]{4}-", hauldatetime), hauldatetime, NA),
+    hauldatetime2 = ymd_hms(hauldatetime2),
+    hauldatetime1 = ifelse(grepl("^[0-9]{4}-", hauldatetime), NA, hauldatetime),
+    hauldatetime1 = as.POSIXct(as.numeric(hauldatetime1)  * (60*60*24), 
+                               origin="1899-12-30", tz="GMT"),
+    hauldatetime  = ifelse(!is.na(hauldatetime2),  hauldatetime2,  hauldatetime1),
+    hauldatetime  = as.POSIXct(as.numeric(hauldatetime), tz="GMT", origin="1970-01-01"),
+    
+    duration      = ifelse(!is.na(shootdatetime) & !is.na(hauldatetime), 
+                           hauldatetime-shootdatetime, NA),
+    duration      = ifelse(duration<=0, NA, duration/3600),
+    year          = year(shootdatetime),
+    month         = month(shootdatetime),
+    day           = yday(shootdatetime)
+  ) %>% 
+  
+  select(-discardedspecieskg, -discardedspecieston, -retainedspecieskg, -vesselid, -catchflagmms,
+         -validfishing, -fishingmethodcode, -targetspeciescode)
+
+# filter(cjm_noneu, !is.na(shootdatetime2)) %>% View()
+# filter(cjm_noneu, !is.na(shootdatetime)) %>% View()
+# glimpse(cjm_noneu)
+# head(mutate(cjm_noneu, test = as.Date(cjm_noneu$shootdatetime3, origin="1970-01-01")))
+
+# combine the offshore files
+offshore_all <-
+  bind_rows(offshore_eu, offshore_noneu) %>% 
+  mutate(
+    vesselname    = tolower(vesselname),
+    
+    vesselcountry = ifelse(vesselcountry %in% c("GER"), "DEU",vesselcountry),
+    vesselcountry = ifelse(vesselcountry %in% c("NED"), "NLD",vesselcountry),
+    vesselcountry = ifelse(vesselname == "margiris", "LIT", vesselcountry),
+    
+    vesselcp      = ifelse(vesselcountry %in% c("DEU","LTU","NLD","LIT","NED","POL"), "EU", vesselcountry)
+  ) %>% 
+  select(vesselname, vesselcountry, vesselcallsign, vesselcode, vesselimo, vesselcp, 
+         shootdatetime, hauldatetime, duration, year, month, day, 
+         shootlat, shootlon, haullat, haullon, 
+         species, catch)
+
+# offshore_all %>% group_by(vesselcountry, vesselname) %>% filter(row_number() ==1) %>% select(vesselcountry, vesselname) %>% View()
+
+# Load the vessel data
+sprfmo_vessels <-
+  read.csv(file  = "D:/SPRFMO/2018/data/CPUE/SPRFMO VesselResultsGrid.csv", 
+           header = TRUE, stringsAsFactors = FALSE ) %>% 
+  lowcase() %>% 
+  mutate_at(c("vesselname"), funs(tolower)) %>% 
+  select(vesselname, vesselcountry=vesselflag, gt=grosstonnage, length)
+
+# unique(sprfmo_vessels$vesselflag)
+# sprfmo_vessels %>% filter(vesselflag %in% c("DEU","NLD","LIT","POL")) %>% View()
+
+# Load the El Nino data
+elnino <- 
+  read_excel(path="D:/SPRFMO/2017/data/elnino.xlsx", col_names = TRUE) %>% 
+  lowcase() %>% 
+  gather(key=month, value=ssf, m12:m11) %>% 
+  mutate(month = as.numeric(gsub("m","", month))) %>% 
+  mutate(ELE   = 0, 
+         ELE   = ifelse(ssf <= -0.5, -1, ELE),
+         ELE   = ifelse(ssf >= 0.5 ,  1, ELE)) %>% 
+  arrange(year, month)
+
+# cjm by day (for CPUE analysis)
+cjm_byhaul <-
+  offshore_all %>% 
+  left_join(sprfmo_vessels, by=c("vesselname")) %>%  # THIS IS NOT WORKING. WHY? DATA INCOMPLETE?
+  left_join(elnino, by=c("year","month")) %>%
+  filter(species == "CJM") %>% 
+  group_by(vesselcp, vesselname, shootdatetime, year, month, day, species) %>% 
+  summarize(catch = sum(catch, na.rm=TRUE),
+           shootlat = mean(shootlat, na.rm=TRUE),
+           shootlon = mean(shootlon, na.rm=TRUE),
+           ssf      = mean(ssf, na.rm=TRUE),
+           ELE      = mean(ELE, na.rm=TRUE)) %>% 
+  mutate(lcatch = log(catch + 0.001)) %>% 
+  ungroup() 
+
+# cjm by day (for CPUE analysis)
+cjm_byday <-
+  offshore_all %>% 
+  left_join(sprfmo_vessels, by=c("vesselname")) %>%  # THIS IS NOT WORKING. WHY? DATA INCOMPLETE?
+  left_join(elnino, by=c("year","month")) %>%
+  filter(species == "CJM") %>% 
+  group_by(vesselcp, vesselname, year, month, day, species) %>% 
+  summarize(catch = sum(catch, na.rm=TRUE),
+           shootlat = mean(shootlat, na.rm=TRUE),
+           shootlon = mean(shootlon, na.rm=TRUE),
+           ssf      = mean(ssf, na.rm=TRUE),
+           ELE      = mean(ELE, na.rm=TRUE)) %>% 
+  mutate(lcatch = log(catch + 0.001)) %>% 
+  ungroup() 
+
+```
+
+## Fisheries CPUE analysis for the offshore fleet fishing for Jack mackerel in the SPRFMO area
+
+&nbsp;  
+
+Martin Pastoors, `r format(Sys.time(), '%d/%m/%Y')`
+
+
+##### page break
+
+### 1. Introduction
+
+The assessment of Jack Mackerel in the southern Pacific is based on many different sources of information, including the nominal Catch per Unit Effort (expressed as catch per day) of the EU fleet. The use of nominal CPUE for calibrating stock assessments is known to be potentially problematic and therefore SPRFMO (2011) recommended that to serve as indices of abundance, the CPUE should be standardized to take into account factors such as historical changes in vessels, fishing areas, seasonal fishing patterns and environmental factors. This standardization approach has already been applied by China (Li et al, 2013). 
+
+In this document, the catch and effort data for the offshore fleet (Eu, Korea, Russia, Vanuatu) is analysed with the aim to develop a standardized CPUE series. Data has been obtained from the SPRFMO secretariat after permission was granted by the different contracting parties that the data could be used for this CPUE analysis. 
+
+### 2. Material and methods
+
+Data from Korea, Russia and Vanuatu was made available by Craig Loveridge on 11 October 2017. Data for EU fisheries was already available as part of the SPRFMO database but also with the underlying spreadsheets that we used to submit the data to SPRFMO.Below is a presentation of an overview of the available data. 
+
+**Number of vessels participating in the fishery**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# number of vessels
+
+cjm_byday %>% 
+  group_by(vesselcp, vesselname, year) %>% 
+  filter(row_number() == 1) %>% 
+  group_by(vesselcp, year) %>% 
+  summarize(nvessels = n()) %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="nvessels", sum, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*Table 2.1. Number of vessels participating in the Jack mackerel fishery by EU, Korea, Russia and Vanuatu.*
+
+##### page break
+
+**Total annual catch (tonnes) by contracting party (cp), year and species (only species with more than 10 ton catch overall)**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# catch by species
+my.species <-
+  offshore_all %>% 
+  group_by(species) %>% 
+  summarize(catch = sum(catch, na.rm=TRUE)) %>% 
+  arrange(-catch) %>% 
+  filter(catch >= 10) %>% 
+  unlist()
+  
+offshore_all %>% 
+  filter(species %in% my.species) %>% 
+  group_by(vesselcp, species, year) %>% 
+  summarize(catch    = as.integer(sum(catch, na.rm=TRUE))) %>% 
+  # mutate(year = as.character(year)) %>% 
+
+  mutate(year = as.character(year)) %>% 
+  dcast(vesselcp + year ~ species, value.var="catch", sum, margins=c("year","species")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))  
+  # ggplot(aes(x=year,y=catch,group=species)) +
+  # theme_publication() +
+  # geom_bar(aes(fill=species), stat="identity")+
+  # facet_wrap(~vesselcp) +
+  # guides(size = guide_legend(nrow = 2))
+
+# filter(cjm_all, vesselcp == "KOR" & is.na(year)) %>% View()
+
+
+```
+
+*Table 2.2. Summary of annual catch by species and contracting party*
+
+**Summed haul durations in hours (when available)**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# Summed haul duration
+
+offshore_all %>% 
+  group_by(vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(vesselcp, year) %>% 
+  summarize(duration = as.integer(sum(duration, na.rm=TRUE))) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="duration", sum, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*Table 2.3. Summed haul durations in Jack mackerel fishery by EU, Korea, Russia and Vanuatu.*
+
+**Number of fishing days (defined as days when a haul has been reported)**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# Number of fishing days
+
+offshore_all %>% 
+  group_by(vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(vesselcp, year) %>% 
+  summarize(fishingdays = n_distinct(day)) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="fishingdays", sum, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*Table 2.4. Number of fishing days in Jack mackerel fishery by EU, Korea, Russia and Vanuatu.*
+
+**Number of hauls **
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# number of hauls
+
+offshore_all %>% 
+  group_by(vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(vesselcp, year) %>% 
+  summarize(nhauls = n()) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="nhauls", sum, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*Table 2.5. Summary of number of hauls by EU, Korea, Russia and Vanuatu.*
+
+**Length of the fishing season (defined as the number of days between the first haul and the last haul in a year)**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# length of fishing season
+
+cjm_byhaul %>% 
+  group_by(vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(vesselcp, year) %>% 
+  summarize(ndays = max(day, na.rm=TRUE) - min(day, na.rm=TRUE) +1) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="ndays", sum, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*Table 2.6. Summary of length of fishing season by EU, Korea, Russia and Vanuatu.*
+
+**Mean catch of jack mackerel per day**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# CPUE per day averaged by year
+
+cjm_byday %>% 
+  
+  group_by(vesselcp, year, species) %>% 
+  summarize(cpue = mean(catch, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="cpue", mean, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*Table 2.7. Mean catch per day of Jack Mackerel by EU, Korea, Russia and Vanuatu.*
+
+##### page break
+
+**Haul positions by contracting party and year**
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+invisible(gc())
+
+cjm_byhaul %>% 
+  filter(!is.na(shootlon) | !is.na(shootlat)) %>% 
+  filter(!is.na(year)) %>% 
+
+  ggplot(aes(x=shootlon, y=shootlat)) +
+  theme_publication() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text        = element_blank(), 
+        axis.title       = element_blank(), 
+        text             = element_text(size=12),
+        legend.key.width = unit(1, "cm"),
+        panel.spacing    = unit(0.1, "lines") ) +  
+  
+  coord_quickmap(xlim=c(-120,-50) , ylim=c(-50,-10)) +
+  geom_polygon(data=world.df, aes(long,lat,group=group), 
+               fill="cornsilk", size=0.25,color="gray15", alpha=0.7) +
+  
+  geom_point(aes(colour=vesselcp), size=0.8, alpha=0.5) +
+  
+  ggtitle("Haul positions by cp and year") +
+  facet_wrap(~year, ncol=5)
+  # facet_grid(rows=vars(vesselcp), cols= vars(year), drop=FALSE)
+
+```
+
+*Figure 2.1. Haul positions by contracting party. Colours indicate the different contracting parties participating.*
+
+##### page break
+
+**Mean catch per day of jack mackerel per one degree longitude and 1/2 degree latitude**
+
+```{r echo=FALSE, fig.width=10, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+t <- 
+  cjm_byday %>% 
+  filter(!is.na(shootlon) & !is.na(shootlat)) %>% 
+  filter(!is.na(year)) %>% 
+  
+  mutate(rect = encode_zchords(x=shootlon, y=shootlat, dx = 1, dy = 0.5) ) %>% 
+
+  group_by(vesselname, year, day, rect) %>% 
+  summarise(catch  = sum(catch, na.rm=TRUE)) %>% 
+  group_by(year, rect) %>% 
+  summarise(catch  = mean(catch, na.rm=TRUE)) %>% 
+  separate(rect, c("shootlon", "shootlat"), sep = ":", convert = TRUE, remove = FALSE) %>% 
+  
+  ungroup()
+
+b <- 
+  log_breaks(n=7)(c(1,max(select(t, catch), na.rm=TRUE))) 
+
+td <-
+  t %>% 
+  mutate(catch = cut(catch,breaks=b, include.lowest=T, dig.lab=10) ) %>% 
+  filter(!is.na(catch))
+
+td %>% 
+  
+  ggplot(aes(x=shootlon, y=shootlat)) +
+  theme_publication() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text        = element_blank(), 
+        text             = element_text(size=12),
+        legend.key.width = unit(1, "cm"),
+        panel.spacing    = unit(0.1, "lines") ) +  
+  
+  coord_quickmap(xlim=c(-120,-50) , ylim=c(-50,-10)) +
+  geom_polygon(data=fao.df, aes(long, lat, group=group), 
+               fill = NA, size=0.25, color="gray60", alpha=0.3) +
+  geom_polygon(data=world.df, aes(long,lat,group=group), 
+               fill="cornsilk", size=0.25,color="gray15", alpha=0.7) +
+  geom_tile(aes(shootlon, shootlat, fill = catch), colour=NA, alpha=1.0) +
+  scale_fill_brewer(palette = "YlOrRd") + 
+  labs(x = NULL, y = NULL) +
+  ggtitle("Jack mackerel catch by day and square") +
+  facet_wrap(~year, drop=FALSE, ncol=5)
+
+# filter(td, is.na(year)) %>% View()
+
+```
+
+
+*Figure 2.2. Catch per day of Jack mackerel (summed by 1 degree longitude and 0.5 degree latitude). Catch in tonnes expressed on a log scale.*
+
+**Jack mackerel catch per day and yearly average catch per day**
+
+The plot below shows the distributions of catch per day and by contracting party. The average catch per day is drawn as a dashed black line. The average catch per day of Korea shows a rather different pattern compared to the non-zero catches. This is due to the number of zero hauls in the dataset (see figure 2.4). This needs to be looked into in more detail. For the CPUE analysis, Korea has been left out from the dataset for now. 
+
+```{r echo=FALSE, fig.width=10, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+m <-
+  cjm_byday %>% 
+  group_by(vesselcp, year) %>%
+  summarise(lcatch = mean(lcatch, na.rm=TRUE), 
+            day     = mean(day, na.rm=TRUE)) %>% 
+  mutate(date = as.numeric(year) + day/365) %>% 
+  data.frame() 
+  
+cjm_byday %>% 
+  mutate(date = year + day/365) %>% 
+
+  ggplot(aes(date, lcatch)) +
+  theme_publication() +
+  # theme(legend.position="none")+
+  geom_jitter(aes(colour=vesselcp)) +
+  geom_line(data=m, aes(date, lcatch), colour="gray20", linetype="dashed", size=1) +
+  geom_point(data=m, aes(date, lcatch)) +
+  scale_x_continuous(breaks=seq(2005, 2017, by = 5)) +
+  facet_wrap(~vesselcp)
+
+```
+
+*Figure 2.3. Jack mackerel CPUE (log(catch / day)). Colours indicate the different contracting parties. *
+
+**Proportion of the number of zero hauls of Jack mackerel by contracting party and year**
+
+```{r echo=FALSE, fig.width=10, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+cjm_byday %>% 
+  mutate(zero = ifelse(catch == 0, TRUE, FALSE)) %>% 
+  group_by(vesselcp, year, zero) %>% 
+  summarize(nobs = n()) %>% 
+  group_by(vesselcp, year) %>% 
+  mutate(prop = nobs / sum(nobs, na.rm=TRUE)) %>% 
+  filter(zero == TRUE | (zero == FALSE & prop == 0)) %>% 
+  
+  ggplot(aes(x=year, y=prop, group=vesselcp)) +
+  theme_publication() +
+  geom_line(aes(colour=vesselcp), size=1) +
+  geom_point(aes(colour=vesselcp)) +
+  facet_wrap(~vesselcp)
+
+```
+
+*Figure 2.4. Proportion of zero catch days for Jack Mackerel*
+
+**Mean Jack mackerel log catch per day and by 10 degree latitude and longitude**
+
+Note: only non-zero catches excluded. 
+
+```{r echo=FALSE, fig.width=10, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+m <-
+  cjm_byhaul %>% 
+  mutate( shootlat2   = 10 * as.integer(shootlat/10),
+          shootlon2   = 10 * as.integer(shootlon/10)) %>% 
+  
+  # create area (combine lat and lon)
+  unite(area, shootlat2, shootlon2, sep=":", remove=FALSE) %>% 
+
+  filter(lcatch >= 0.001) %>% 
+  filter(shootlat2 %in% c(-20, -30, -40)) %>% 
+  filter(!grepl("NA", area)) %>% 
+  group_by(year, area, shootlat2, shootlon2) %>%
+  summarise(lcatch = mean(lcatch, na.rm=TRUE), 
+            day     = mean(day, na.rm=TRUE)) %>% 
+  mutate(date = as.numeric(year) + day/365) 
+
+cjm_byhaul %>% 
+  mutate( shootlat2   = 10 * as.integer(shootlat/10),
+          shootlon2   = 10 * as.integer(shootlon/10)) %>% 
+  
+  # create area (combine lat and lon)
+  unite(area, shootlat2, shootlon2, sep=":", remove=FALSE) %>% 
+
+  filter(!grepl("NA", area)) %>% 
+  filter(lcatch >= 0.001) %>% 
+  filter(shootlat2 %in% c(-20, -30, -40)) %>% 
+  mutate(date = year + day/365) %>% 
+  mutate(shootlat2 = factor(shootlat2, levels = c("-20", "-30", "-40"))) %>% 
+  # group_by(shootlat2) %>% filter(row_number() ==1) %>% select(shootlat2) %>% View()
+
+  ggplot(aes(date, lcatch, group=area)) +
+  theme_publication() +
+  # theme(legend.position="none") +
+  geom_point(aes(colour=vesselcp), alpha=0.5) +
+  geom_line(data=m, aes(x=date, y=lcatch), colour="gray20", linetype="dashed", size=1, inherit.aes = FALSE) +
+  scale_x_continuous(breaks = seq(2005, 2017, by = 5)) +
+  facet_grid((shootlat2)~shootlon2)
+
+
+```
+
+*Figure 2.5. Jack Mackerel log catch per day (non-zero catches only) by 10 degrees latitude (rows) and longitude (columns)*
+
+**El Nino effect**
+
+Note: taken from NOAA ....
+
+```{r echo=FALSE, fig.width=10, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+elnino %>% 
+  mutate(date = year + (month-1)/12) %>% 
+  filter(year >= 2005) %>% 
+  
+  ggplot(aes(date, ssf) ) +
+  theme_publication() +
+  # theme(legend.position="none") +
+  geom_point(alpha=0.5, colour="blue") +
+  geom_line(colour="blue") +
+  geom_line(aes(y=ELE), colour="red") +
+  scale_x_continuous(breaks = seq(2005, 2017, by = 5)) 
+
+
+```
+
+[ Description of the modelling approach here ]
+
+### 3. Results
+
+Different models with increasing complexity
+
+gam00 <- gam(lcatch ~ as.factor(year)                                          , data=cjm_all)
+
+gam01 <- gam(lcatch ~ as.factor(year) + vesselname                             , data=cjm_all)
+
+gam02 <- gam(lcatch ~ as.factor(year) + gt                                     , data=cjm_all)
+
+gam03 <- gam(lcatch ~ as.factor(year) + vesselname + te(shootlon,shootlat,k=5) , data=cjm_all)
+
+gam04 <- gam(lcatch ~ as.factor(year) + vesselname + month                     , data=cjm_all)
+
+gam05 <- gam(lcatch ~ as.factor(year) + gt + month                             , data=cjm_all)
+
+gam06 <- gam(lcatch ~ as.factor(year) + gt + month + shootlat2                 , data=cjm_all)
+
+gam07 <- gam(lcatch ~ as.factor(year) + gt + month + te(shootlat,k=5)          , data=cjm_all)
+
+gam08 <- gam(lcatch ~ as.factor(year) + gt + month + te(shootlon, shootlat,k=5), data=cjm_all)
+
+gam09 <- gam(lcatch ~ as.factor(year) + gt + month + ELE                       , data=cjm_all)
+
+gam10 <- gam(lcatch ~ as.factor(year) + vesselname + ELE                       , data=cjm_all)
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE}
+
+# GAM: Generalized Additive Models
+
+# 00 null model
+gam00       <- gam(lcatch ~ as.factor(year), data=cjm_byday)
+gam00_pred  <- 
+  expand.grid(year = unique(cjm_byday$year)) %>% 
+  mutate     (pred = exp(predict(gam00,  newdata=., type="response" ))) %>% 
+  mutate(model="gam00", desc="null") %>% 
+  arrange(year)
+
+# 01: year and vesselname
+gam01       <- gam(lcatch ~ as.factor(year) + vesselname,  data=cjm_byday)
+gam01_pred  <-   
+  expand.grid(year       = unique(cjm_byday$year), 
+              vesselname = cjm_byday$vesselname[1]) %>% 
+  mutate     (pred  = exp(predict(gam01,newdata=., type="response" ))) %>% 
+  mutate(model="gam01", desc="vessel") %>% 
+  arrange    (year)
+
+# gam02 <- gam(lcatch ~ as.factor(year) + gt                                     , data=cjm_byday)
+
+# 03: year, vesselname and spatial spline
+gam03       <- gam(lcatch ~ as.factor(year) + vesselname + te(shootlon,shootlat,k=5) , data=cjm_byday)
+gam03_pred  <-   
+  expand.grid(year       = unique(cjm_byday$year),
+              vesselname = cjm_byday$vesselname[1],
+              shootlon   = cjm_byday$shootlon[1],
+              shootlat   = cjm_byday$shootlat[1]) %>% 
+  mutate     (pred  = exp(predict(gam03,  
+                                  newdata=., type="response" ))) %>% 
+  mutate(model="gam03", desc="vessel spatial lat_long") %>% 
+  arrange    (year)
+
+# 04: year, vesselname and month
+gam04       <- gam(lcatch ~ as.factor(year) + vesselname + month , data=cjm_byday)
+gam04_pred  <-   
+  expand.grid(year       = unique(cjm_byday$year),
+              vesselname = cjm_byday$vesselname[1],
+              month      = cjm_byday$month[1]) %>% 
+  mutate     (pred  = exp(predict(gam04, newdata=., type="response" ))) %>% 
+  mutate(model="gam04", desc="vessel month") %>% 
+  arrange    (year)
+  
+# Bind together
+gam_comb <- 
+  bind_rows(gam00_pred, gam01_pred) %>% 
+  # bind_rows(         ., gam02_pred) %>% 
+  bind_rows(         ., gam03_pred) %>% 
+  bind_rows(         ., gam04_pred) 
+
+ggplot(gam_comb, aes(x=year, y=pred)) +
+  theme_publication() +
+  geom_point() +
+  geom_line() +
+  expand_limits(y=0) + 
+  scale_x_continuous(breaks=seq(2005, 2017, by = 5)) +
+  facet_wrap(~model, scales="free_y")
+
+gam.check(gam01); summary(gam01); anova(gam01); AIC(gam01)
+gam.check(gam02); summary(gam02); anova(gam02); AIC(gam02)
+gam.check(gam03); summary(gam03); anova(gam03); AIC(gam03)
+gam.check(gam04); summary(gam04); anova(gam04); AIC(gam04)
+
+models <- c("gam00", "gam01","gam03","gam04")
+desc   <- gam_comb %>% filter(year=="2015") %>% select(model, desc) %>% filter(model != "cpue")
+aic    <- matrix(NA, nrow=length(models), ncol=1, dimnames=list(name=models, "AIC"))
+
+for (i in models) {
+  aic[i,]<-AIC(get(i))  
+} 
+
+aic <-
+  as.data.frame(aic) %>% 
+  rownames_to_column() %>% 
+  rename(model=rowname) %>% 
+  left_join(desc, by=c("model"))
+
+View(aic)
+
+```
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE}
+
+# GAMM Generalized Additive Mixed Models
+
+
+```
+
+### 4. Discussion and conclusions
+
+### 5. References
+
+Li, G., X. Zou, X. Chen, Y. Zhou and M. Zhang (2013). "Standardization of CPUE for Chilean jack mackerel (Trachurus murphyi) from Chinese trawl fleets in the high seas of the Southeast Pacific Ocean." Journal of Ocean University of China 12(3): 441-451.
+
+SPRFMO (2011) Report of the Jack Mackerel Subgroup. Tenth Science Working Group of SPRFMO, 19 – 23 September 2011, Port Vila, Vanuatu.
+

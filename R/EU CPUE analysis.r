@@ -1,8 +1,10 @@
 # ==================================================================
-# SPRFMO read EU catch effort
+# EU CPUE analysis.r
 #
 # 17/09/2017: first version, adapted from read_kenmerken
 # 21/09/2017: expanded to include GAM models for CPUE
+# 08/05/2018: new reader in separate code; keeps the datetime objects (at UTC time)
+#             reserve code; will be embedded in the rmarkdown version
 # ==================================================================
 
 # Reset lists
@@ -22,13 +24,23 @@ library(mgcv)          # tensor spline for gam
 
 options(max.print=9999999)
 
-setwd("D:/SPRFMO/2017")
+# setwd("D:/SPRFMO/2017")
 
-source("D:/GIT/mptools/R/my_utils.r")
+# set onedrive directory
+onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF') 
 
-load("D:/XXX/prf/rdata/world.df.RData")
-load("D:/XXX/prf/rdata/eez.df.RData")
-load("D:/XXX/prf/rdata/fao.df.RData")
+# load spatial data
+load(file.path(onedrive,"rdata/fao.RData"))
+load(file.path(onedrive,"rdata/eez.RData"))
+load(file.path(onedrive,"rdata/icesrectangles.RData"))
+
+load(file.path(onedrive,"rdata/world.df.RData"))
+load(file.path(onedrive,"rdata/fao.df.RData"))
+load(file.path(onedrive,"rdata/eez.df.RData"))
+
+# source utilities
+source("../../prf/r/my utils.R")
+source("../../gisland/r/geo_inside.R")
 
 # ================================================================================
 # Reading in additional files
@@ -63,226 +75,10 @@ elnino <-
   arrange(year, month)
 
 
-# -----------------------------------------------------------------------------------
-# read old haullists
-# -----------------------------------------------------------------------------------
-
-old.file.name  <- list.files(path = "data", recursive  = F, pattern    = "haullists", full.names = TRUE,  ignore.case= TRUE)
-oldlists <-
-  read_excel(old.file.name, 
-             sheet     = 1, 
-             col_names = FALSE, 
-             col_types = "text", 
-             range     = "A2:Z2000", # cell_cols("A:V"),
-             na        = "",
-             skip      = 2) %>% 
-  mutate  (
-    file    = old.file.name,
-    ws      = excel_sheets( old.file.name) )
-
-names(oldlists) <-  
-  c("vesselcountry","vesselname","vesselcallsign","vesselcode", "vesselimo", 
-    "shootdate","shoottime", "hauldate", "haultime","duration", 
-    "shootlat","shootlon","haullat","haullon",
-    "targetspecies","trawltype","trawltype2", 
-    "openingheight", "openingwidth", 
-    "geardepth","waterdepth","temperature", 
-    "cjm","mas", "oth", "marinemammalbycatch",
-    "filename", "worksheet")
-
-# convert to long format (catch is in tonnes)
-oldlists <-
-  oldlists %>% 
-  filter(!is.na(vesselcountry)) %>% 
-  mutate(
-    shootdate = ifelse(toupper(shootdate)=="NA",NA, shootdate),
-    shootdate = as.Date(as.numeric(shootdate), origin = "1899-12-30"),
-    shoottime = as.numeric(shoottime),
-    shoottime = ifelse(shoottime >= 1, shoottime/24, shoottime),
-   
-    hauldate  = ifelse(toupper(hauldate)=="NA",NA, hauldate),
-    hauldate  = as.Date(as.numeric(hauldate), origin = "1899-12-30"),
-    haultime  = as.numeric(haultime),
-    haultime  = ifelse(haultime >= 1, haultime/24, haultime),
-   
-    duration  = as.numeric(duration),
-    duration  = ifelse(is.na(duration) & !is.na(shoottime) & !is.na(haultime) & hauldate > shootdate, 
-                       1+haultime-shoottime, duration),
-    duration  = ifelse(is.na(duration) & !is.na(shoottime) & !is.na(haultime) & hauldate == shootdate, 
-                       haultime-shoottime, duration),
-    duration  = ifelse(duration==0, NA, duration),
-   
-    temperature = ifelse(temperature == "0", NA, temperature)
-  ) %>% 
-  gather(key=species, value=catch, cjm:oth) %>% 
-  mutate_at(vars(shootlat, shootlon, haullat, haullon, openingheight, openingwidth, 
-                 geardepth, temperature, catch), 
-            funs(as.numeric)) %>% 
-  mutate(
-    haullat       = ifelse(haullat == 0, NA, haullat),
-    haullon       = ifelse(haullon == 0, NA, haullon),
-    shootlat      = ifelse(shootlat > 0, -1*shootlat, shootlat),
-    shootlon      = ifelse(shootlon > 0, -1*shootlon, shootlon),
-    haullat       = ifelse(haullat > 0, -1*haullat, haullat),
-    haullon       = ifelse(haullon > 0, -1*haullon, haullon),
-    
-    year          = year(shootdate),
-    month         = month(shootdate),
-    day           = yday(shootdate)
-  ) %>% 
-  data.frame()
-
-# filter(oldlists, grepl("\\s+", shootlat)) %>% View()
-# filter(t, grepl("\\s+", shootlat)) %>% View()
-
-# count_not_na(oldlists)  
-# glimpse(oldlists)
-# sortunique(oldlists$duration)
-# sortunique(oldlists$temperature)
-# hist(oldlists$temperature)
-# hist(oldlists$shoottime)
-# filter(oldlists, haullon ==-8.4) %>% View()
-summary(oldlists)
-
-# ================================================================================
-# Reading the catch effort files
-# ================================================================================
-
-# Create file list for import 
-file.list          <- list.files(
-  path       = "data",
-  recursive  = T,
-  pattern    = "SPRFMO",
-  full.names = TRUE,
-  ignore.case= TRUE)
-file.list <- file.list[!grepl("\\~",file.list)]
-
-
-i <- 1
-j <- 1
-
-for (i in 1:length(file.list)){                                           
-
-  # get number of worksheets
-  j <- length( excel_sheets( file.list[i] ) )
-  
-  # read all the worksheets in the file
-  for (j in 1:j) {
-    
-    print(paste(i, file.list[i], excel_sheets( file.list[i])[j], sep=" "))
-    
-    tmp <-
-      read_excel(file.list[i], 
-        sheet     = j, 
-        col_names = FALSE, 
-        col_types = "text", 
-        range     = "A2:V1000", # cell_cols("A:V"),
-        na        = "",
-        skip      = 2) %>% 
-      mutate  (
-        file    = file.list[i],
-        ws      = excel_sheets( file.list[i])[j]) 
-
-    # print(names(tmp))
-    
-    # add to total dataset
-    if (i==1 & j == 1) t<-tmp else t<-rbind(t,tmp)  
-    
-  } # end of j loop
-} # end of i loop
-
-# add names to columns
-names(t) <-  c("vesselcountry","vesselname","vesselcallsign","vesselcode", "vesselimo", 
-               "shootdatetime","hauldatetime", 
-               "shootlat","shootlon","haullat","haullon",
-               "targetspecies","trawltype","trawltype2", 
-               "openingheight", "openingwidth", 
-               "geardepth","waterdepth","marinemammalbycatch",
-               "species","catch","discarded", "filename", "worksheet")
-
-# filtering and manipulations
-newlists <- 
-  t %>% 
-  filter(!is.na(vesselcountry)) %>% 
-  filter(!grepl("vessel",tolower(vesselcountry))) %>% 
-  
-  mutate(
-    vesselcode    = gsub("\\s+|-", "", vesselcode),
-    vesselcallsign= gsub("\\.", "", toupper(vesselcallsign)),
-    species       = tolower(species),
-    
-    shootdatetime = gsub("\\s+", "",toupper(shootdatetime)),
-    shootdate     = substr(shootdatetime, 1, 11),
-    shoottime     = substr(shootdatetime, 13, 20),
-    shoottime     = gsub(";", ":", shoottime), 
-    shoottime     = gsub("-", "0", shoottime),
-
-    hauldatetime  = gsub("\\s+", "",toupper(hauldatetime)),
-    hauldate      = substr(hauldatetime, 1, 11),
-    haultime      = substr(hauldatetime, 13, 20),
-    haultime      = gsub(";",":", haultime), 
-
-    catch         = ifelse(is.na(catch)    , "0", gsub("\\s+", "", catch)),
-    catch         = as.numeric(catch) / 1000, 
-    
-    discarded     = ifelse(is.na(discarded), "0", gsub("\\s+", "", discarded)),
-    discarded     = as.numeric(discarded)
-    
-  ) %>% 
-  
-  mutate_at(c("shootlat","shootlon","haullat","haullon",
-              "openingheight","openingwidth","geardepth"), funs(as.numeric))     %>% 
-  mutate_at(c("vesselcode","vesselname")                 , funs(tolower))        %>% 
-  mutate_at(c("shootdate","hauldate")                    , funs(lubridate::ymd)) %>%
-  # mutate_at(c("shoottime","haultime")                    , funs(lubridate::hms)) %>% 
-  
-  mutate(
-    species       = ifelse(is.na(species) & catch == 0, "cjm",species),
-    year          = year(shootdate),
-    month         = month(shootdate),
-    day           = yday(shootdate),
-    
-    st            = as.POSIXct(shoottime, format = "%H:%M:%S"),
-    shoottime     = (hour(st)*3600 + minute(st)*60 + second(st))/86400 ,
-    ht            = as.POSIXct(haultime, format = "%H:%M:%S"),
-    haultime      = (hour(ht)*3600 + minute(ht)*60 + second(ht))/86400 ,
-
-    duration      = ifelse(!is.na(shoottime) & !is.na(haultime) & hauldate > shootdate, 
-                           1+haultime-shoottime, NA),
-    duration      = ifelse(!is.na(shoottime) & !is.na(haultime) & hauldate == shootdate, 
-                           haultime-shoottime, duration),
-    duration      = ifelse(duration<=0, NA, duration),
-    
-    haullat       = ifelse(haullat == 0, NA, haullat),
-    haullon       = ifelse(haullon == 0, NA, haullon),
-    shootlat      = ifelse(shootlat > 0, -1*shootlat, shootlat),
-    shootlon      = ifelse(shootlon > 0, -1*shootlon, shootlon),
-    haullat       = ifelse(haullat > 0, -1*haullat, haullat),
-    haullon       = ifelse(haullon > 0, -1*haullon, haullon)
-  ) %>% 
-  select(-st,-ht) %>% 
-  as.data.frame()
-
-count_not_na(newlists)  
-glimpse(newlists)
-
-# sortunique(newlists$vesselcallsign)
-# sortunique(newlists$temperature)
-# hist(newlists$duration)
-# hist(newlists$shoottime)
-# hist(newlists$haultime)
-# hist(log(newlists$catch+1))
-# filter(newlists, grepl("20:3:",shoottime)) %>% View()
-# filter(newlists, duration <=0) %>% View()
-# filter(newlists, nchar(haultime)<8) %>% View()
-# hms(as.data.frame(sortunique(newlists$shoottime)), quiet = FALSE)
 
 # -----------------------------------------------------------------------------------
 # make cjm dataset. 
 # -----------------------------------------------------------------------------------
-
-factor <- 
-  data.frame(year=c(2005:2017), f =c(1,1,1.4, 1.5, 1, 1, 1.5, 1, 1, 1, 1, 1, 1))
 
 cjm  <- 
   rbind.all.columns(oldlists, newlists) %>% 
