@@ -5,6 +5,7 @@
 # 21/09/2017: expanded to include GAM models for CPUE
 # 08/05/2018: new reader; keep the datetime objects (at UTC time)
 # 23/05/2018: finalized readed to offshore_eu2005_2017 data objects
+# 28/05/2018: kept raised EU catches apart from observed catches
 # ==================================================================
 
 # Reset lists
@@ -283,11 +284,9 @@ offshore_eu2005_2017  <-
     vesselname    = tolower(vesselname)
   ) %>% 
 
-  filter(species == "CJM") %>% 
-  
   # add and apply the correction factor (see Report to 2009 WG)
   left_join(factor, by=c("year")) %>% 
-  mutate(catch = catch * f) %>% 
+  mutate(catch2 = catch * f) %>% 
 
   data.frame()
 
@@ -298,3 +297,11 @@ save(offshore_eu2005_2017, file="D:/SPRFMO/2018/rdata/offshore_eu2005_2017.RData
 # hist(eu_cjm2005_2017$duration)
 # hist(filter(cjm_noneu, vesselcountry=="VUT")$duration)
 # filter(cjm_eu, is.na(year)) %>% View()
+
+# offshore_eu2005_2017 %>% 
+#   group_by(year, species) %>% 
+#   summarize(
+#     catch  = sum(catch, na.rm=TRUE),
+#     catch2 = sum(catch2, na.rm=TRUE)) %>% 
+#   filter(species == "CJM")
+
