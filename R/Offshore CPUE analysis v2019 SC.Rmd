@@ -14,7 +14,7 @@ output:
 # 23/05/2018 Added data quality checking
 # 28/05/2018 Version presented at the SPRFMO benchmark
 # 09/08/2018 Version that includes 2017 data; only agreed methodology included. 
-# 09/09/2018 Version where catch per week is not divided by the number of days, simply catch per week
+# 16/09/2019 Updated version that includes China
 # ---------------------------------------------------------------------------------------
 
 require("knitr")
@@ -22,7 +22,7 @@ knitr::opts_chunk$set(echo = FALSE,	message = FALSE,	warning = FALSE,	comment = 
 knitr::opts_chunk$set(fig.width=10) 
 knit_hooks$set(crop = hook_pdfcrop)
 
-# rm(list=ls())
+rm(list=ls())
 
 options(max.print=1000000)
 
@@ -68,10 +68,6 @@ data_path <- "D:/SPRFMO/data"
 fy <- 2006
 ly <- 2018
 
-# source the Offshore CPUE reader to read in all the CPUE data
-# source("Offshore CPUE reader.r")
-load(file.path(data_path, "offshore_all2005_2019.RData"))
-
 # Load the El Nino data
 elnino <- 
   read_excel(path=file.path(data_path, "elnino.xlsx"), col_names = TRUE) %>% 
@@ -88,9 +84,12 @@ hci <-
   read.csv(file=file.path(data_path,"HCI_v.csv"), skip=2, header=TRUE) %>% 
   lowcase()
 
+# source the Offshore CPUE reader to read in all the CPUE data
+# source("Offshore CPUE reader.r")
+
 # create offshore_all object with environmental data
 offshore_all <-
-  offshore_all2005_2019 %>% 
+  get(load(file.path(data_path, "offshore_all.RData"))) %>% 
   left_join(elnino, by=c("year","month")) %>% 
   left_join(hci, by=c("year","month"))
 
@@ -116,6 +115,7 @@ cjm_byhaul <-
   mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), funs(as.factor)) %>% 
   drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
             "shootlat","shootlon","sst","ELE", "hci"))
+
 
 # cjm by day (for CPUE analysis)
 cjm_byday <-
@@ -150,7 +150,7 @@ cjm_byweek <-
   mutate(week        = week(shootdatetime)) %>% 
   group_by(vesselcp, vesselcode2, year, month, week, species) %>% 
   summarize(catch    = sum(catch, na.rm=TRUE),
-            effort   = 1,
+            effort   = n_distinct(day),
             shootlat = mean(shootlat, na.rm=TRUE),
             shootlon = mean(shootlon, na.rm=TRUE),
             sst      = mean(sst, na.rm=TRUE),
@@ -200,15 +200,15 @@ mean_vessel <-
 &nbsp;  
 `r format(Sys.time(), '%d/%m/%Y')`
 
-**7th Meeting of the Scientific Committee**
+**6th Meeting of the Scientific Committee**
 
-Havana, Cuba 7 - 12 October 2019
+Puerto Varas, Chili 9 - 14 September 2018
 
 &nbsp;  
 
-**SC7-JMxx**
+**SC6-JM05**
 
-Standardized Jack mackerel CPUE for the offshore fleet (including China)
+Standardized Jack mackerel CPUE for the offshore fleet
 
 &nbsp;  
 
@@ -257,7 +257,7 @@ offshore_all %>%
   
   mutate(year = as.character(year)) %>% 
   dcast(year ~ vesselcp, value.var="nvessels", sum, margins="vesselcp") %>% 
-  # mutate(year = ifelse(year == max(year), paste0(year,"*"), year)) %>% 
+  mutate(year = ifelse(year == max(year), paste0(year,"*"), year)) %>% 
   pandoc.table(., 
                style        = "simple",
                split.tables = 100, 
@@ -271,7 +271,8 @@ offshore_all %>%
 
 *`r tab_nums("nvessels")`*
 
-&nbsp;  
+'*' Year 2019 is imcomplete in this table and all subsequent tables.
+
 
 **Summed haul durations in hours**
 
@@ -292,7 +293,7 @@ offshore_all %>%
   summarize(duration = as.integer(sum(duration, na.rm=TRUE))) %>% 
   mutate(year = as.character(year)) %>% 
   dcast(year ~ vesselcp, value.var="duration", sum, margins="vesselcp") %>% 
-  # mutate(year = ifelse(year == max(year), paste0(year,"*"), year)) %>% 
+  mutate(year = ifelse(year == max(year), paste0(year,"*"), year)) %>% 
   pandoc.table(., 
                style        = "simple",
                split.tables = 100, 
@@ -527,7 +528,7 @@ cjm_byweek %>%
   ungroup() %>% 
   
   mutate(year = as.character(year)) %>% 
-  mutate(year = ifelse(year == max(year), paste0(year,"*"), year)) %>% 
+  # mutate(year = ifelse(year == max(year), paste0(year,"*"), year)) %>% 
   dcast(year ~ vesselcp, value.var="catch", mean, margins="vesselcp") %>% 
   pandoc.table(., 
                style        = "simple",
@@ -782,7 +783,7 @@ newdat    <- expand.grid(
   shootlat    = quantile(cjm_byweek$shootlat,probs=c(0.5)),
   sst         = quantile(cjm_byweek$sst,probs=c(0.5)),
   vesselcode2 = names(rev(sort(colSums(table(cjm_byweek$year,cjm_byweek$vesselcode2)))))[1],
-  effort      = 1
+  effort      = 7
   )
 
 finalMod  <- gam(formula = final,
@@ -832,13 +833,13 @@ df        <- data.frame(
                lwr  = lwr,
                year = as.numeric(fy:ly),
                type = "standardized",
-               assessmentyear = 2018, 
+               assessmentyear = 2019, 
                stringsAsFactors = FALSE) %>% 
   bind_rows(read.csv(file="D:/SPRFMO/data/Offshore fleet standardized CPUE 2017.csv"))
 
 # plot the final year only
 df %>% 
-  filter(assessmentyear == 2018) %>% 
+  filter(assessmentyear == 2019) %>% 
   
   ggplot(aes(year)) +
   theme_publication() +

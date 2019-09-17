@@ -7,50 +7,46 @@
 # 23/05/2018: finalized readed to offshore_eu2005_2017 data objects
 # 28/05/2018: kept raised EU catches apart from observed catches
 # 08/08/2018: updated with 2017 data and incuded all CPUE data for offshore fleets; runs as sourced
+# 12/08/2019: updated with new full dataset; includes China.
 # ==================================================================
 
 # Reset lists
 # rm(list=ls())
 
 # general libraries
-# library(readxl)        # excel reader from hadley; much quicker than the java based excel readers
-# library(lubridate)     # data and time functions
-# library(stringr)       # string manipulation
-# library(pander)        # for tables
-# library(reshape2)      # cast and melt dataframes
-# library(broom)         # clean up statistics
-# library(scales)        # pretty scales
-# library(tidyverse)     # data manipulation and piping
-# library(gam)           # gam analysis
-# library(mgcv)          # tensor spline for gam
-
-# options(max.print=9999999)
-
-# setwd("D:/SPRFMO/2017")
+library(readxl)        # excel reader from hadley; much quicker than the java based excel readers
+library(lubridate)     # data and time functions
+library(stringr)       # string manipulation
+library(pander)        # for tables
+library(reshape2)      # cast and melt dataframes
+library(broom)         # clean up statistics
+library(scales)        # pretty scales
+library(tidyverse)     # data manipulation and piping
+library(gam)           # gam analysis
+library(mgcv)          # tensor spline for gam
 
 # set onedrive directory
-# onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF') 
+onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF')
 
 # load spatial data
-# load(file.path(onedrive,"rdata/fao.RData"))
-# load(file.path(onedrive,"rdata/eez.RData"))
-# load(file.path(onedrive,"rdata/icesrectangles.RData"))
-
-# load(file.path(onedrive,"rdata/world.df.RData"))
-# load(file.path(onedrive,"rdata/fao.df.RData"))
-# load(file.path(onedrive,"rdata/eez.df.RData"))
+load(file.path(onedrive,"rdata/fao.RData"))
+load(file.path(onedrive,"rdata/eez.RData"))
+load(file.path(onedrive,"rdata/icesrectangles.RData"))
+load(file.path(onedrive,"rdata/world.df.RData"))
+load(file.path(onedrive,"rdata/fao.df.RData"))
+load(file.path(onedrive,"rdata/eez.df.RData"))
 
 # source utilities
-# source("../prf/r/my utils.R")
-# source("../gisland/r/geo_inside.R")
+source("../prf/r/my utils.R")
+source("../gisland/r/geo_inside.R")
 
-# data_path <- "D:/SPRFMO/data"
+data_path <- "D:/SPRFMO/data"
 
 # -----------------------------------------------------------------------------------
 # read old EU haullists (2005-2008)
 # -----------------------------------------------------------------------------------
 
-offshore_eu2005_2008 <-
+offshore_eu_old <-
   read_excel(file.path(data_path,"EU haullists 2005-2008.xlsx"), 
              sheet     = 1, 
              col_names = FALSE, 
@@ -79,7 +75,7 @@ offshore_eu2005_2008 <-
   # convert variable types
   mutate_at(c("shootdate", "shoottime", "hauldate","haultime", 
               "shootlat","shootlon","haullat","haullon",
-              "openingheight", "openingwidth", "geardepth", "temperature"), funs(as.numeric)) %>% 
+              "openingheight", "openingwidth", "geardepth", "temperature"), list(as.numeric)) %>% 
   
   mutate(
     shoottime     = ifelse(is.na(shoottime), 0, shoottime),
@@ -97,7 +93,7 @@ offshore_eu2005_2008 <-
   
   gather(key=species, value=catch, cjm:oth) %>% 
   
-  mutate_at(vars(catch), funs(as.numeric)) %>% 
+  mutate_at(vars(catch), list(as.numeric)) %>% 
   
   mutate(
     haullat       = ifelse(haullat == 0, NA, haullat),
@@ -163,7 +159,7 @@ for (i in 1:length(file.list)){
 
 
 # filtering and manipulations
-offshore_eu2009_2018 <- 
+offshore_eu_new <- 
   t %>% 
   setNames(c("vesselcountry","vesselname","vesselcallsign","vesselcode", "vesselimo", 
              "shootdatetime","hauldatetime", 
@@ -176,7 +172,7 @@ offshore_eu2009_2018 <-
   filter(!grepl("vessel",tolower(vesselcountry))) %>% 
   
   mutate_at(c("shootlat","shootlon","haullat","haullon",
-              "openingheight","openingwidth","geardepth"), funs(as.numeric))     %>% 
+              "openingheight","openingwidth","geardepth"), list(as.numeric))     %>% 
   
   mutate(
     vesselcode    = gsub("\\s+|-", "", vesselcode),
@@ -210,6 +206,8 @@ offshore_eu2009_2018 <-
   ) %>% 
   data.frame()
 
+# offshore_eu_new %>% distinct(year) %>% View()
+
 # hist(offshore_eu2009_2017$duration)
 # filter(offshore_eu2009_2018, is.na(shootdatetime)) %>% View()
 # sortunique(newlists$vesselcallsign)
@@ -229,10 +227,10 @@ offshore_eu2009_2018 <-
 
 # CHECK: WHAT IS THE CORRECTION FACTOR FOR? COMPARED WITH AD's DATA?
 factor <- 
-  data.frame(year=c(2005:2018), f =c(1,1,1.4, 1.5, 1, 1, 1.5, 1, 1, 1, 1, 1, 1, 1))
+  data.frame(year=c(2005:2019), f =c(1,1,1.4, 1.5, 1, 1, 1.5, 1, 1, 1, 1, 1, 1, 1, 1))
 
-offshore_eu2005_2018  <- 
-  bind_rows(offshore_eu2005_2008, offshore_eu2009_2018) %>% 
+offshore_eu_all  <- 
+  bind_rows(offshore_eu_old, offshore_eu_new) %>% 
 
   # add and apply the correction factor (see Report to 2009 WG)
   left_join(factor, by=c("year")) %>% 
@@ -240,51 +238,25 @@ offshore_eu2005_2018  <-
 
   data.frame()
 
-  
-save(offshore_eu2005_2018, file=file.path(data_path, "Offshore_eu2005_2018.RData"))
+# unique(offshore_eu_new$year)
+# offshore_eu2005_2019 %>% filter(grepl("2017", filename)) %>% View()
+
+
+save(offshore_eu_all, file=file.path(data_path, "Offshore_eu_all.RData"))
 
 # -----------------------------------------------------------------------------------
 # read non-EU dataset. 
 # -----------------------------------------------------------------------------------
 
-# Create file list for import 
-file.list   <- list.files(
-  path = data_path, 
-  recursive  = T,
-  pattern    = "Offshorefleets",
-  full.names = TRUE,
-  ignore.case= TRUE)
-file.list <- file.list[!grepl("\\~",file.list)]
-
-i <- 1
-j <- 1
-
-for (i in 1:length(file.list)){                                           
-  
-  # get number of worksheets in the file
-  j <- length( excel_sheets( file.list[i] ) )
-  
-  # read all the worksheets in the file
-  for (j in 1:j) {
-    
-    print(paste(i, file.list[i], excel_sheets( file.list[i])[j], sep=" "))
-    
-    tmp <-
-      read_excel(file.list[i], 
-                 sheet     = j, 
-                 col_names = TRUE,
-                 col_types = "text",
-                 range     = "D1:X18960") 
-    
-    # add to total dataset
-    if (i==1 & j == 1) t<-tmp else t<-rbind(t,tmp)  
-    
-  } # end of j loop
-} # end of i loop
-
-
-offshore_noneu2007_2017 <-
-  t %>% 
+offshore_noneu_all <-
+  read_excel(file.path(data_path,"OffshorefleetsAug2019_sansEU.xlsx"), 
+             sheet     = 1, 
+             col_names = TRUE, 
+             col_types = "text", 
+             # range     = "A2:Z2000", # cell_cols("A:V"),
+             na        = "",
+             skip      = 0) %>% 
+  mutate  (file    = "OffshorefleetsAug2019_sansEU.xlsx") %>%
   lowcase() %>% 
   rename(
     vesselcallsign = callsign, 
@@ -303,7 +275,7 @@ offshore_noneu2007_2017 <-
   
   # change variabele type
   mutate_at(c("shootlat","shootlon",
-              "haullat","haullon", "catch"), funs(as.numeric)) %>% 
+              "haullat","haullon", "catch"), list(as.numeric)) %>% 
   
   # specific modifications of variables
   mutate(
@@ -333,26 +305,31 @@ offshore_noneu2007_2017 <-
   ) %>% 
   
   filter(!vesselcode %in% c("1704","9505073-6210008")) %>%    #remove vessels that have problem with units of catch
+  mutate(vesselcountry = ifelse (vesselcountry %in% c("NLD","DEU","LTU","POL"), "EU", vesselcountry)) %>% 
+  # filter(!vesselcountry %in% c("NLD","DEU","LTU","POL")) %>% 
   # filter(validfishing == "1") %>% 
   
   dplyr::select(-discardedspecieskg, -discardedspecieston, -retainedspecieskg, -vesselid, -catchflagmms,
                 -validfishing, -fishingmethodcode, -targetspeciescode)
 
-save(offshore_noneu2007_2017, file=file.path(data_path, "Offshore_noneu2007_2017.RData"))
+save(offshore_noneu_all, file=file.path(data_path, "Offshore_noneu_all.RData"))
+
 
 # filter(cjm_noneu, !is.na(shootdatetime2)) %>% View()
 # filter(cjm_noneu, !is.na(shootdatetime)) %>% View()
 # glimpse(offshore_noneu)
 # head(mutate(cjm_noneu, test = as.Date(cjm_noneu$shootdatetime3, origin="1970-01-01")))
 # filter(offshore_noneu, is.na(validfishing) ) %>% View()
-# range(offshore_noneu$year, na.rm=T)
+# range(offshore_noneu2007_2018$year, na.rm=T)
+# unique(offshore_noneu_all$year)
 
 # -----------------------------------------------------------------------------------
 # combine the offshore files
 # -----------------------------------------------------------------------------------
 
-offshore_all2005_2018 <-
-  bind_rows(offshore_eu2005_2018, offshore_noneu2007_2017) %>% 
+
+offshore_all <-
+  bind_rows(offshore_eu_all, offshore_noneu_all) %>% 
   filter(!is.na(catch)) %>% 
   mutate(
     species       = toupper(species),
@@ -374,19 +351,21 @@ offshore_all2005_2018 <-
 
 # create vesselcodes
 sprfmo_vesselcodes <-
-  offshore_all2005_2018 %>% 
+  offshore_all %>% 
   distinct(vesselcp, vesselname) %>% 
   group_by(vesselcp) %>% 
   mutate(vesselcode2 = paste0(vesselcp, row_number()))
 
 # add vesselcode
-offshore_all2005_2018 <-
-  offshore_all2005_2018 %>% 
+offshore_all <-
+  offshore_all %>% 
   left_join(sprfmo_vesselcodes, by=c("vesselname", "vesselcp"))
 
-save(offshore_all2005_2018, file=file.path(data_path, "Offshore_all2005_2018.RData"))
+save(offshore_all, file=file.path(data_path, "Offshore_all.RData"))
 
 # offshore_all %>% group_by(vesselcountry, vesselname) %>% filter(row_number() ==1) %>% select(vesselcountry, vesselname) %>% View()
+# offshore_all %>% distinct(year)
+# sort(unique(offshore_all$year))
 
 
 # load the traditional CPUE dataset used in the assessment
