@@ -7,7 +7,7 @@
 # 23/05/2018: finalized readed to offshore_eu2005_2017 data objects
 # 28/05/2018: kept raised EU catches apart from observed catches
 # 08/08/2018: updated with 2017 data and incuded all CPUE data for offshore fleets; runs as sourced
-# 12/08/2019: updated with new full dataset; includes China.
+# 12/08/2019: updated with new full dataset; includes China. Removed EU from SPRFMO data
 # ==================================================================
 
 # Reset lists
@@ -118,7 +118,7 @@ offshore_eu_old <-
 file.list   <- list.files(
       path = data_path, 
       recursive  = T,
-      pattern    = "SPRFMO",
+      pattern    = "^SPRFMO.*\\.xls.",
       full.names = TRUE,
       ignore.case= TRUE)
 file.list <- file.list[!grepl("\\~",file.list)]
@@ -305,7 +305,7 @@ offshore_noneu_all <-
   ) %>% 
   
   filter(!vesselcode %in% c("1704","9505073-6210008")) %>%    #remove vessels that have problem with units of catch
-  mutate(vesselcountry = ifelse (vesselcountry %in% c("NLD","DEU","LTU","POL"), "EU", vesselcountry)) %>% 
+  filter(!vesselcountry %in% c("NLD","DEU","LTU","POL")) %>%    #remove vessels from EU
   # filter(!vesselcountry %in% c("NLD","DEU","LTU","POL")) %>% 
   # filter(validfishing == "1") %>% 
   
@@ -321,12 +321,13 @@ save(offshore_noneu_all, file=file.path(data_path, "Offshore_noneu_all.RData"))
 # head(mutate(cjm_noneu, test = as.Date(cjm_noneu$shootdatetime3, origin="1970-01-01")))
 # filter(offshore_noneu, is.na(validfishing) ) %>% View()
 # range(offshore_noneu2007_2018$year, na.rm=T)
-# unique(offshore_noneu_all$year)
+# unique(offshore_noneu_all$vesselcountry)
 
 # -----------------------------------------------------------------------------------
 # combine the offshore files
 # -----------------------------------------------------------------------------------
 
+offshore_eu_all <- get(load(file=file.path(data_path, "Offshore_eu_all.RData")))
 
 offshore_all <-
   bind_rows(offshore_eu_all, offshore_noneu_all) %>% 

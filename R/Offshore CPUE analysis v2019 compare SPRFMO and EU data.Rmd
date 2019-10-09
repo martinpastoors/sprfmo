@@ -1,0 +1,362 @@
+---
+output: 
+  word_document:
+    reference_docx:  ../PFA_report_template_v1.4.dotx
+---
+
+```{r setup, include=FALSE}
+
+# ---------------------------------------------------------------------------------------
+# Offshore CPUE analysis v2019 compare SPRFMO and EU data
+#
+# 17/09/2019 Benchmark type analysis for SPRFMO 2019; includes China in CPUE series; uses only data from SPRFM secretariat
+# ---------------------------------------------------------------------------------------
+
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE,	message = FALSE,	warning = FALSE,	comment = "",	crop = TRUE )
+knitr::opts_chunk$set(fig.width=10) 
+knit_hooks$set(crop = hook_pdfcrop)
+
+rm(list=ls())
+
+options(max.print=1000000)
+
+# Libraries
+library(rmarkdown)     # rmarkdown functionality
+library(pander)        # tables
+library(lubridate)     # data handling
+library(reshape2)      # reshaping data; e.g. cast
+library(readxl)        # excel reader
+library(broom)         # clean up statistics
+library(scales)        # pretty scales
+library(stringr)       # string manipulations
+library(tidyverse)     # combined package of dplyr, tidyr, ggplot, readr, purrr and tibble
+library(mgcv)          # tensor spline for gam
+library(lme4)
+library(MASS)
+library(captioner)    # captioning of figures and tables
+
+# default settings for tables
+panderOptions('table.alignment.default', function(df) ifelse(sapply(df, is.numeric), 'right', 'left'))
+
+# To number figures and tables
+fig_nums <- captioner::captioner(prefix = "Figure ")
+tab_nums <- captioner::captioner(prefix = "Table ")
+
+# set onedrive directory
+onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF') 
+
+# load spatial data
+load(file.path(onedrive,"rdata/world.df.RData"))
+load(file.path(onedrive,"rdata/fao.df.RData"))
+# load(file.path(onedrive,"rdata/eez.df.RData"))
+# load(file.path(onedrive,"rdata/fao.RData"))
+# load(file.path(onedrive,"rdata/eez.RData"))
+
+# Source my personal utilities
+source("../../prf/r/my utils.R")
+source("../../gisland/r/geo_inside.R")
+
+data_path <- "D:/SPRFMO/data"
+
+# year settings
+fy <- 2006
+ly <- 2018
+ay <- 2019
+
+# create offshore_all object with environmental data
+offshore_eu <-
+  get(load(file.path(data_path, "offshore_all.RData"))) %>% 
+  filter(vesselcp=="EU") %>% 
+  mutate(source="eu")
+
+offshore_eu_sprfmo <-
+  get(load(file.path(data_path, "offshore_all_sprfmo.RData"))) %>% 
+  filter(vesselcp=="EU") %>% 
+  mutate(source="sprfmo")
+
+offshore_eu_comb <-
+  bind_rows(offshore_eu, offshore_eu_sprfmo)
+
+
+```
+
+**Compare EU data in SPRFMO database and from EU data itself**
+
+M.A. Pastoors 
+
+mpastoors@pelagicfish.eu
+
+`r format(Sys.time(), '%d/%m/%Y')`
+
+
+**Number of vessels participating in the fishery**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+# number of vessels
+
+offshore_eu_comb %>%
+  filter(species == "CJM") %>% 
+  filter(year %in% 2009:2012) %>% 
+  group_by(source, vesselcode2, vesselname, year) %>% 
+  filter(row_number() == 1) %>% 
+  arrange(year, source, vesselname) %>% 
+  View()
+
+
+offshore_eu_comb %>%
+  filter(species == "CJM") %>% 
+  group_by(source, vesselcode2, year) %>% 
+  filter(row_number() == 1) %>% 
+  group_by(source, year) %>% 
+  summarize(nvessels = n()) %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ source, value.var="nvessels", sum) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("nvessels")`*
+
+##### page break
+
+**Total catch of jack mackerel per year**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "cjmcatch", 
+         caption = "Total catch of Jack mackerel by contracting party",
+         display = FALSE)
+
+
+# summed catch of CJM
+offshore_eu_comb %>% 
+  filter(species == "CJM") %>% 
+  
+  group_by(source, year, species) %>% 
+  summarize(catch = sum(catch, na.rm=TRUE)) %>% 
+  
+  ungroup() %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ source, value.var="catch", sum, margins=c("source", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("cjmcatch")`*
+
+##### page break
+
+**Summed fishing hours (when available)**
+
+I.e. numbers of hours fished. The data for 2017 are incomplete. 
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "haulduration", 
+         caption = "Summed fishing hours by contracting party",
+         display = FALSE)
+
+# Summed haul duration
+offshore_eu_comb %>% 
+  group_by(source, vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(source, year) %>% 
+  summarize(duration = as.integer(sum(duration, na.rm=TRUE))) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ source, value.var="duration", sum, margins=c("source", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("haulduration")`*
+
+##### page break
+
+**Number of fishing days (defined as days when a haul has been reported)**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "fishingdays", 
+         caption = "Number of fishing days by contracting party",
+         display = FALSE)
+
+# Number of fishing days
+
+offshore_eu_comb %>% 
+  group_by(source, vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  # fishing days by vessel
+  group_by(source, vesselname, year) %>% 
+  summarize(fishingdays = n_distinct(day)) %>% 
+  
+  # fishing days by CP
+  group_by(source, year) %>% 
+  summarize(fishingdays = sum(fishingdays, na.rm=TRUE)) %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ source, value.var="fishingdays", sum, margins=c("source", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("fishingdays")`*
+
+**Number of hauls **
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "nhauls", 
+         caption = "Number of hauls by contracting party",
+         display = FALSE)
+
+# number of hauls
+offshore_eu_comb %>% 
+  group_by(source, vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(source, year) %>% 
+  summarize(nhauls = n()) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ source, value.var="nhauls", sum, margins=c("source", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("nhauls")`*
+
+##### page break
+
+**Length of the fishing season (defined as the number of days between the first haul and the last haul in a year)**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "fishingseason", 
+         caption = "Length of the fishing season (days) by Contracting Party",
+         display = FALSE)
+
+# length of fishing season
+
+offshore_eu_comb %>% 
+  filter(species == "CJM") %>% 
+  group_by(source, vesselcode2, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  group_by(source, year) %>% 
+  summarize(ndays = max(day, na.rm=TRUE) - min(day, na.rm=TRUE) +1) %>% 
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ source, value.var="ndays", mean, margins=c("source", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("fishingseason")`*
+
+
+
+##### page break
+
+**EU Haul positions by source and year**
+
+The yearly postions of Jack mackerel fishery of the EU fleets. 
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+invisible(gc())
+
+offshore_eu_comb %>% 
+  # offshore_all %>% 
+  # filter(species == "CJM") %>% 
+  filter(!is.na(shootlon) | !is.na(shootlat)) %>% 
+  filter(!is.na(year)) %>% 
+
+  ggplot(aes(x=shootlon, y=shootlat)) +
+  theme_publication() +
+  theme(axis.title       = element_blank(), 
+        text             = element_text(size=12),
+        legend.key.width = unit(1, "cm"),
+        panel.spacing    = unit(0.1, "lines") ) +  
+  
+  coord_quickmap(xlim=c(-120,-50) , ylim=c(-50,-10)) +
+  geom_polygon(data=world.df, aes(long,lat,group=group), 
+               fill="cornsilk", size=0.25,color="gray15", alpha=0.7) +
+  
+  geom_point(aes(colour=source), size=0.8, alpha=0.5) +
+  
+  ggtitle("EU haul positions by source and year") +
+  facet_wrap(~year, ncol=3)
+  # facet_grid(rows=vars(vesselcp), cols= vars(year), drop=FALSE)
+
+```
+
+*Figure 2.3. Haul positions by contracting party. Colours indicate the different contracting parties participating.*
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+invisible(gc())
+
+offshore_eu_comb %>% 
+  filter(!is.na(shootlon) | !is.na(shootlat)) %>% 
+  filter(!is.na(year)) %>% 
+  filter(year == 2008) %>% 
+  filter(species == "CJM") %>% 
+  filter(tolower(vesselname) == "annelies ilena")  %>%
+  mutate(catch = ifelse(source=="sprfmo", 1000*catch, catch)) %>% 
+  ggplot(aes(x=shootdatetime, y=catch)) +
+  theme_publication() +
+  theme(axis.title       = element_blank(), 
+        text             = element_text(size=12),
+        legend.key.width = unit(1, "cm"),
+        panel.spacing    = unit(0.1, "lines") ) +  
+  
+  geom_point(aes(colour=source), size=0.8, alpha=0.5) 
+  # facet_grid(rows=vars(vesselcp), cols= vars(year), drop=FALSE)
+
+```
