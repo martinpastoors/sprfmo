@@ -1,13 +1,13 @@
 ---
 output: 
   word_document:
-    reference_docx:  ../PFA_report_template_v1.4.dotx
+    reference_docx:  ../PFA_report_template_v1.7.dotx
 ---
 
 ```{r setup, include=FALSE}
 
 # ---------------------------------------------------------------------------------------
-# Jack mackerel CPUE analysis for offshore fleet in SPRFMO area (EU, Russia, Vanuatu, Korea + China)
+# Jack mackerel CPUE analysis for offshore fleet in SPRFMO area (EU, Russia, Vanuatu, Korea + China) 
 #
 # 23/09/2017 First coding of the CPUE analysis
 # 08/05/2018 Added the fleets of Russia, Vanuatu and Korea
@@ -18,7 +18,8 @@ output:
 #            uses only data from SPRFMO secretariat
 # 19/09/2019 included comparison with old Chinese CPUE series
 # 25/09/2019 final checking of code and results
-# 05/10/2019 updated the HCI and El Nino data; previously that lead to curtailing the dataseries
+# 05/10/2019 adapted to include preliminary 2019 data
+# 11/08/2020 updated with official data until 2019
 # ---------------------------------------------------------------------------------------
 
 require("knitr")
@@ -60,8 +61,8 @@ tab_nums <- captioner::captioner(prefix = "Table ")
 
 # set paths
 onedrive  <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF') 
-data_path <- "D:/SPRFMO/2019/CPUE"
-prev_data_path <- "D:/SPRFMO/2018/CPUE"
+data_path <- "D:/SPRFMO/2020/CPUE"
+prev_data_path <- "D:/SPRFMO/2019/CPUE"
 
 # dropbox   <- file.path(get_dropbox(),"jurel","archiv", "SC06_2018")
 
@@ -72,23 +73,21 @@ load(file.path(onedrive,"rdata/fao.df.RData"))
 # load(file.path(onedrive,"rdata/fao.RData"))
 # load(file.path(onedrive,"rdata/eez.RData"))
 
+
 # year settings
 fy <- 2008
-ly <- 2018
-ay <- 2019
-
-# Load old Chinese CPUE data
-# china <-
-#   read.csv(file=paste0(dropbox, "/Chinese CPUE 2001-2017.csv"), header=TRUE) %>% 
-#   lowcase() %>% 
-#   filter (year >= fy) 
+ly <- 2019
+ay <- 2020
 
 # Load the El Nino data
 elnino <- 
-  read_excel(path=file.path(data_path, "elnino 20191005.xlsx"), col_names = TRUE) %>% 
+  read_excel(path=file.path(data_path, "elnino 20200811.xlsx"), 
+             col_names = TRUE,
+             sheet="data") %>% 
   lowcase() %>% 
   gather(key=month, value=sst, m1:m12) %>% 
   mutate(month = as.numeric(gsub("m","", month))) %>% 
+  filter(!is.na(sst)) %>% 
   mutate(ELE   = 0, 
          ELE   = ifelse(sst <= -0.5, -1, ELE),
          ELE   = ifelse(sst >= 0.5 ,  1, ELE)) %>% 
@@ -96,15 +95,15 @@ elnino <-
 
 # Load the Humbold Current Index
 hci <-
-  read.csv(file=file.path(data_path,"HCI_v 20191005.csv"), skip=2, header=TRUE) %>% 
-  lowcase()
+  read.csv(file=file.path(data_path,"HCI_v 20200811.csv"), skip=2, header=TRUE) %>% 
+  lowcase() %>% 
+  filter(!is.na(hci))
 
 # Source the Offshore CPUE reader to read in all the CPUE data
 source("Offshore CPUE reader only from SPRFMO.r")
 
 # create offshore_all object with environmental data
 offshore_all <-
-  # get(load(file.path(data_path, "offshore_all.RData"))) %>% 
   get(load(file.path(data_path, "offshore_all_sprfmo.RData"))) %>% 
   left_join(elnino, by=c("year","month")) %>% 
   left_join(hci, by=c("year","month")) %>% 
@@ -134,9 +133,11 @@ cjm_byhour <-
          cpue        = ifelse(!is.na(effort) & effort > 0, catch/effort, NA),
          lcpue       = ifelse(!is.na(effort), log(catch/effort+0.1), NA)) %>% 
   ungroup() %>% 
-  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), funs(as.factor)) %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
   drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
             "shootlat","shootlon","sst","ELE", "hci"))
+
+# cjm_byhour %>% filter(year == 2019) %>% View()
 
 # offshore_all %>% filter(vesselcp=="EU" & year == 2008) %>% count_not_na() # ggplot(aes(effort)) + geom_histogram()
 # offshore_all %>% filter(vesselcp=="EU" & year == 2008) %>% filter(is.na(duration)) %>% View()
@@ -163,7 +164,7 @@ cjm_byday <-
          cpue        = catch,
          lcpue       = log(catch + 0.1)) %>% 
   ungroup() %>% 
-  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), funs(as.factor)) %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
   drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
             "shootlat","shootlon","sst","ELE", "hci"))
 
@@ -193,7 +194,7 @@ cjm_byweek <-
          lcpue       = log(catch/effort + 0.1)) %>% 
   ungroup() %>% 
   filter(catch > 0) %>%            # if no catch during a week, this is suspicious ?? CHECK!
-  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), funs(as.factor)) %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
   drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
             "shootlat","shootlon","sst","ELE", "hci"))
 
@@ -219,13 +220,20 @@ mean_vessel <-
 
 # Load the CPUE index calculated the previous year
 oldindex <-
-  read.csv(file.path(prev_data_path, "Offshore fleet standardized CPUE 2006-2017.csv"), stringsAsFactors = FALSE)
+  read.csv(file.path(prev_data_path, "Offshore fleet standardized CPUE 2008-2018.csv"), stringsAsFactors = FALSE)
+
 
 ```
 
-**CPUE standardization for the offshore fleet fishing for Jack mackerel in the SPRFMO area, including China**
+8th MEETING OF THE SCIENTIFIC COMMITTEE
 
-M.A. Pastoors & N.T. Hintzen (European Union)
+Videomeeting, 3 to 8 October 2020
+
+SC8-JM02
+
+**CPUE standardization for the offshore fleet fishing for Jack mackerel in the SPRFMO area**
+
+European Union
 
 Corresponding author: mpastoors@pelagicfish.eu
 
@@ -233,6 +241,8 @@ Corresponding author: mpastoors@pelagicfish.eu
 
 
 **Abstract**
+
+[ Not updated yet ]
 
 Prior to 2018 two offshore CPUE series have been used in the assessment of Jack Mackerel: the standardized Chinese CPUE and the nominal offshore fleet CPUE (EU, Vanuatu, Korea, Russia). During the benchmark assessment of 2018, the nominal offshore CPUE has been converted into a standardized CPUE series, following the same methods as used for the Chinese CPUE. This working document presents the results of a fully combined and standardized Offshore CPUE index that is based on the haul-by-haul data of China, EU, Korea, vanuatu and Russia as contained in the SPRFMO database. Permission to utilize that information was granted by the respective Contracting Parties  while the analysis was carried out by scientists from the EU delegation. The standardization procedure is identical to the procedure followed during the benchmark in 2018. The working document consists of a description of the data available for the analysis and the methods towards model choice to select the optimal model configuration for CPUE standardization. The final GAM model consists of a number of discrete factors (year, vessel, month and El Nino Effect) and a smoothed interaction between latitude and longitude. The new standardized CPUE series starts in 2008 as this is the first year for which haul by haul information was available to carry out this analysis. CPUE for the offshore fleet has decreased between 2008 and 2012, has slowly increased between 2013 and 2017 and has substantially decreased in 2018, indicating a lower availability of jack mackerel in the offshore waters.    
 
@@ -466,6 +476,7 @@ offshore_all %>%
 
 *`r tab_nums("fishinghours")`*
 
+
 ##### page break
 
 **Average duration of a fishing haul**
@@ -602,7 +613,7 @@ offshore_all %>%
 
 The yearly postions of Jack mackerel fishery of the offshore fleets. 
 
-```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
 
 fig_nums(name    = "haulpositionsbyyear", 
          caption = "Haul positions where Jack mackerel has been caught (by year). Colours indicate the different contracting parties",
@@ -627,7 +638,7 @@ cjm_byhour %>%
   geom_polygon(data=world.df, aes(long,lat,group=group), 
                fill="cornsilk", size=0.25,color="gray15", alpha=0.7) +
   
-  geom_point(aes(colour=vesselcp), size=0.8, alpha=0.5) +
+  geom_point(aes(colour=vesselcp), size=0.8, alpha=0.4) +
   
   ggtitle("CJM haul positions by year") +
   facet_wrap(~year, ncol=3)
@@ -644,7 +655,7 @@ cjm_byhour %>%
 
 **Mean catch per day of jack mackerel per one degree longitude and 1/2 degree latitude**
 
-```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
 
 fig_nums(
   name    = "catchperdayperrect", 
@@ -697,7 +708,7 @@ td %>%
   scale_fill_brewer(palette = "YlOrRd") + 
   labs(x = NULL, y = NULL) +
   ggtitle("Jack mackerel catch by day and square") +
-  facet_wrap(~year, drop=FALSE, ncol=4)
+  facet_wrap(~year, drop=FALSE, ncol=3)
 
 # filter(td, is.na(year)) %>% View()
 
@@ -1257,6 +1268,7 @@ store[["formglm"]] <- glm.nb(formglm, data=cjm_byweek)
 store[["formglmy"]]<- glm.nb(formglmy,data=cjm_byweek)
 store[["formgam"]]    <- gam(formgam, data=cjm_byweek,
                              family = negbin(glm.nb(formglm,data=cjm_byweek)$theta))
+# this one takes a long time to run!
 store[["formgamy"]]   <- gam(formgamy, data=cjm_byweek,
                              family = negbin(glm.nb(formglmy,data=cjm_byweek)$theta))
 
@@ -1345,7 +1357,7 @@ anova(store[["formgamy"]])
 
 **Final model**
 
-Although the GLM and GAM models that included interaction between lat-long and year performed best (lowest AICs), they have not been selected as the final model as the interpretation of the year effect in the model becomes more problematic while this is the essential output of the model. Therefore, the GAM model without interaction between space and year has been selected. The final model was selected as the following model:
+Although the GLM and GAM models that included interaction between lat-long and year performed best (lowest AICs), they have not been selected as the final model as the interpretation of the year effect in the model becomes more problematic while this is the essential output of the model. Therefore, consistent with the approach selected during the benchmark in 2018 (SCW6), the GAM model without interaction between space and year has been selected. The final model was :
 
 *Catch ~ offset(log(effort)) + year + vessel + month + s(lat-lon) + ELE*
 
@@ -1413,14 +1425,18 @@ df        <- data.frame(
                lwr  = lwr,
                year = fy:ly,
                type = "standardized",
+               assessmentyear = ay, 
                stringsAsFactors = FALSE) 
 
-ggplot(df, aes(year)) +
+bind_rows(oldindex, df) %>% 
+  
+  ggplot(aes(x=year, y=cpue, group=assessmentyear)) +
   theme_publication() +
-  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=type), alpha=0.2) +
-  geom_line(aes(y=cpue, colour=type), size=1) +
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=factor(assessmentyear)), alpha=0.2) +
+  geom_line(aes(colour=factor(assessmentyear)), size=1) +
   expand_limits(y=0) +
   labs(y="cpue") +
+  scale_x_continuous(breaks= seq(fy,ly,1)) +
   facet_wrap(~type, scales = "free_y")
 
 
@@ -1456,15 +1472,16 @@ tab_nums(
 
 df %>% 
   filter(type == "standardized") %>% 
-  mutate_at(c("cpue","upr","lwr"), funs(as.integer)) %>% 
+  mutate_at(c("cpue","upr","lwr"), list(as.integer)) %>% 
   dplyr::select(year, cpue, lwr, upr) %>% 
   print(row.names=FALSE)
 
 # save to csv
 df %>% 
   filter(type=="standardized") %>% 
-  mutate(assessmentyear = ay) %>% 
-  write.csv(file=paste0("Offshore fleet standardized CPUE ",fy,"-",ly,".csv"), row.names = FALSE)
+  write.csv(file=file.path(data_path, 
+                           paste0("Offshore fleet standardized CPUE ",fy,"-",ly,".csv")), 
+            row.names = FALSE)
 
 ```
 
@@ -1628,6 +1645,7 @@ ggplot(df, aes(year)) +
   geom_line(aes(y=cpue, colour=type), size=1) +
   expand_limits(y=0) +
   labs(y="cpue") +
+  scale_x_continuous(breaks= seq(fy,ly,1)) +
   facet_wrap(~type, scales = "free_y", ncol=2)
 
 
@@ -1782,6 +1800,7 @@ ggplot(df, aes(year)) +
   geom_point(aes(y=cpue, colour=type), size=1.5) +
   expand_limits(y=0) +
   labs(y="cpue") +
+  scale_x_continuous(breaks= seq(fy,ly,1)) +
   facet_wrap(~type, scales = "free_y", ncol=2)
 
 

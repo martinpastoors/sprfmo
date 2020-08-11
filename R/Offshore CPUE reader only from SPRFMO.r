@@ -1,5 +1,5 @@
 # ==================================================================
-# Offshore CPUE reader only from SPRFMO
+# Offshore CPUE reader only from SPRFMO.r
 #
 # 17/09/2017: first version, adapted from read_kenmerken
 # 21/09/2017: expanded to include GAM models for CPUE
@@ -9,53 +9,55 @@
 # 08/08/2018: updated with 2017 data and incuded all CPUE data for offshore fleets; runs as sourced
 # 12/08/2019: updated with new full dataset; includes China.
 # 17/09/2019: only used data received from SPRFMO secretariat
+# 11/08/2020: update for data received in august 2020
 # ==================================================================
 
 # Reset lists
 # rm(list=ls())
 
 # general libraries
-library(readxl)        # excel reader from hadley; much quicker than the java based excel readers
-library(lubridate)     # data and time functions
-library(stringr)       # string manipulation
-library(pander)        # for tables
-library(reshape2)      # cast and melt dataframes
-library(broom)         # clean up statistics
-library(scales)        # pretty scales
-library(tidyverse)     # data manipulation and piping
+# library(readxl)        # excel reader from hadley; much quicker than the java based excel readers
+# library(lubridate)     # data and time functions
+# library(stringr)       # string manipulation
+# library(pander)        # for tables
+# library(reshape2)      # cast and melt dataframes
+# library(broom)         # clean up statistics
+# library(scales)        # pretty scales
+# library(tidyverse)     # data manipulation and piping
 
 # set onedrive directory
-onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF')
+# onedrive <- file.path(Sys.getenv('USERPROFILE'), 'PFA/PFA team site - PRF')
 
 # load spatial data
-load(file.path(onedrive,"rdata/fao.RData"))
-load(file.path(onedrive,"rdata/eez.RData"))
-load(file.path(onedrive,"rdata/icesrectangles.RData"))
-load(file.path(onedrive,"rdata/world.df.RData"))
-load(file.path(onedrive,"rdata/fao.df.RData"))
-load(file.path(onedrive,"rdata/eez.df.RData"))
+# load(file.path(onedrive,"rdata/fao.RData"))
+# load(file.path(onedrive,"rdata/eez.RData"))
+# load(file.path(onedrive,"rdata/icesrectangles.RData"))
+# load(file.path(onedrive,"rdata/world.df.RData"))
+# load(file.path(onedrive,"rdata/fao.df.RData"))
+# load(file.path(onedrive,"rdata/eez.df.RData"))
 
 # source utilities
-source("../prf/r/my utils.R")
-source("../gisland/r/geo_inside.R")
+# source("../prf/r/my utils.R")
+# source("../gisland/r/geo_inside.R")
 
-data_path <- "D:/SPRFMO/data"
+# data_path <- "D:/SPRFMO/data"
 
 # -----------------------------------------------------------------------------------
 # read SPRFMO offshore dataset. 
 # -----------------------------------------------------------------------------------
 
-# Note: the filename says it is sansEU, but in fact it is with EU!
+# fn <- "Offshorefleets 20190801.xlsx"
+fn <- "Offshorefleets 20200803.xlsx"
 
 offshore_all <-
-  read_excel(file.path(data_path,"OffshorefleetsAug2019_sansEU.xlsx"), 
+  read_excel(file.path(data_path,fn), 
              sheet     = 1, 
              col_names = TRUE, 
              col_types = "text", 
              # range     = "A2:Z2000", # cell_cols("A:V"),
              na        = "",
              skip      = 0) %>% 
-  mutate  (file    = "OffshorefleetsAug2019_sansEU.xlsx") %>%
+  mutate  (file    = fn) %>%
   lowcase() %>% 
   rename(
     vesselcallsign = callsign, 
@@ -74,6 +76,9 @@ offshore_all <-
   
   # change variabele type
   mutate_at(c("shootlat","shootlon","haullat","haullon", "catch"), list(as.numeric)) %>% 
+  
+  # vesselname to lowercase
+  mutate(vesselname = tolower(vesselname)) %>% 
   
   # specific modifications of variables
   mutate(
@@ -106,6 +111,9 @@ offshore_all <-
   
   filter(!is.na(catch)) %>% 
   
+  # added during 2020
+  filter(validfishing == 1) %>% 
+  
   filter(!vesselcode %in% c("1704","9505073-6210008")) %>%    #remove vessels that have problem with units of catch
   
   filter(!grepl("alina|sirius", tolower(vesselname))) %>%    #remove vessels that have way too many zero hauls
@@ -125,7 +133,8 @@ offshore_all <-
   ) %>% 
   
   # catch corrections
-  mutate(catch = ifelse(vesselname %in% c("annelies ilena", "franziska","helen mary", "jan maria", "maartje theadora") & year == 2008,
+  mutate(catch = ifelse(vesselname %in% c("annelies ilena", "franziska","helen mary", "jan maria", 
+                                          "maartje theadora") & year == 2008,
                         1000*catch, catch)) %>% 
   
   dplyr::select(vesselname, vesselcountry, vesselcallsign, vesselcode, vesselimo, vesselcp, 
@@ -148,9 +157,27 @@ offshore_all <-
 
 save(offshore_all, file=file.path(data_path, "Offshore_all_sprfmo.RData"))
 
-# offshore_all %>% filter(vesselname=="annelies ilena", year==2008) %>% View()
-
 # CHECKS
+
+# offshore_all %>% filter(vesselname=="annelies ilena", year==2008) %>% View()
+# offshore_all %>% group_by(vesselname, vesselcode) %>% summarize(catch = sum(catch, na.rm=TRUE)) %>% View()
+
+# offshore_all %>% 
+#   filter(vesselname=="maartje theadora") %>% 
+#   group_by(vesselname, vesselcode, year) %>% 
+#   summarize(catch = as.integer(sum(catch, na.rm=TRUE))) %>% 
+#   View()
+
+# get(load(file.path(data_path, "offshore_all_sprfmo2008-2019.RData"))) %>% 
+# offshore_all %>%
+#   # filter(vesselname %in% c("maartje theadora", "helen mary", "annelies ilena", "franziska","jan maria",
+#   #                          "margiris")) %>% 
+#   # filter(year == 2008) %>% 
+#   group_by(year, vesselname, vesselcountry) %>% 
+#   summarize(avgcatch = scales::comma(mean(catch, na.rm=TRUE), accuracy=0.1)) %>% 
+#   pivot_wider(names_from="year", values_from = "avgcatch") %>% 
+#   arrange(vesselcountry, vesselname) %>% 
+#   View()
 
 # filter(cjm_noneu, !is.na(shootdatetime2)) %>% View()
 # filter(cjm_noneu, !is.na(shootdatetime)) %>% View()
