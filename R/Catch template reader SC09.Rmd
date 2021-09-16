@@ -180,6 +180,53 @@ read_length <- function(file, ws, member, species, year) {
 } # end of function
 
 
+# read WLK function -------------------------------------------------------------------
+
+# file       <- file.list[1]
+# worksheets <- excel_sheets(file)
+# ws         <- worksheets[grepl("WLK", worksheets)][3]
+# member     <- as.character(read_excel(file, sheet = 1, col_names = FALSE, col_types = "text", range = "F6"))
+# species    <- as.character(read_excel(file, sheet = 1, col_names = FALSE, col_types = "text", range = "F5"))
+# year       <- as.integer  (read_excel(file, sheet = 1, col_names = FALSE, col_types = "numeric", range = "K3"))
+
+read_wlk <- function(file, ws, member, species, year) {
+
+  # fleet      <- gsub("LEN ","", ws)
+  fleet      <- stringr::word(gsub("FLEET ", "F", toupper(ws)), 2)
+  lengthtype <- as.character(read_excel(file, sheet = ws, col_names = FALSE, col_types = "text", 
+                                        range = "A9", .name_repair = "minimal"))
+  lengthunit <- as.character(read_excel(file, sheet = ws, col_names = FALSE, col_types = "text", 
+                                        range = "A10", .name_repair = "minimal"))
+  unit       <- as.character(read_excel(file, sheet = ws, col_names = FALSE, col_types = "text", 
+                                        range = "F5", .name_repair = "minimal"))
+
+  t <-
+    suppressMessages(read_excel(file, sheet = ws, col_names = FALSE, na="NA", col_types = "text", 
+                                range = "A11:E110", .name_repair = "minimal")) %>%
+    setNames(c("length","quarter1","quarter2","quarter3","quarter4")) %>%
+    gather(key=quarter, value=value, quarter1:quarter4) %>%
+    mutate(member=member, species=species, year=year, file=basename(file), fleet=fleet, unit=unit,
+           lengthtype=lengthtype, lengthunit = lengthunit)  %>%
+    mutate(quarter = as.numeric(stringr::str_match_all(quarter, "[0-9]+")) ) %>%
+    mutate(value   = as.numeric(gsub("\\s+", "", value) )) %>%
+    mutate(length  = as.numeric(length)) %>%
+    mutate(unit = gsub("[[:punct:]]", "", tolower(unit))) %>%
+    mutate(lengthunit = gsub("[[:punct:]]", "", tolower(lengthunit))) %>%
+    filter(!is.na(value)) %>%
+
+    arrange(member, fleet, species, year, quarter, lengthtype, length) %>%
+    ungroup()
+
+
+  # generate dataframe is not all empty
+  if (nrow(t) > 0) {
+    print(ws)
+    return(t)
+  }
+
+} # end of function
+
+
 # read_alk function -------------------------------------------------------------------
 
 # file       <- file.list[1]
@@ -314,7 +361,7 @@ read_canum <- function(file, ws, member, species, year) {
 # ws   <- "catch data"
 
 # create empty dataframes
-catch <- sampling <- length <- alk <- alk2 <- canum <- data.frame(stringsAsFactors = FALSE)
+catch <- sampling <- length <- wlk <- alk <- alk2 <- canum <- data.frame(stringsAsFactors = FALSE)
 # i <- 8
 
 # start file reading loop
@@ -349,6 +396,11 @@ for (i in 1:length(file.list)){
     if(!grepl("TL", toupper(ws))) {
       length <- bind_rows(length, read_length(file=file, ws=ws, member=member, species=species, year=year)) }
     }
+  
+  # wlk
+  for (ws in worksheets[grepl("WLK", worksheets)]) {
+      wlk <- bind_rows(wlk, read_wlk(file=file, ws=ws, member=member, species=species, year=year)) 
+  }
   
   # alk
   for (ws in worksheets[grepl("ALK", worksheets)]) {
@@ -399,7 +451,8 @@ alk <-
   ungroup()
   
 # save(catch, sampling, length, alk, canum, file=file.path("D:/TEMP",fn))
-save(catch, sampling, length, alk, canum, file=file.path(data_path,paste0("SC09_data_",format(Sys.time(), '%Y%m%d'), ".RData")))
+save(catch, sampling, length, wlk, alk, canum, 
+     file=file.path(data_path,paste0("SC09_data_",format(Sys.time(), '%Y%m%d'), ".RData")))
 
 ```
 
