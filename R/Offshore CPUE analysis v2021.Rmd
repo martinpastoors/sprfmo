@@ -1,0 +1,867 @@
+---
+output: 
+  word_document:
+    reference_docx:  ../PFA_report_template_v1.7.dotx
+---
+
+```{r setup, include=FALSE}
+
+# ---------------------------------------------------------------------------------------
+# Jack mackerel CPUE analysis for offshore fleet in SPRFMO area (EU, Russia, Vanuatu, Korea + China) 
+#
+# 23/09/2017 First coding of the CPUE analysis
+# 08/05/2018 Added the fleets of Russia, Vanuatu and Korea
+# 23/05/2018 Added data quality checking
+# 28/05/2018 Version presented at the SPRFMO benchmark
+# 08/08/2018 Version that includes 2017 data
+# 17/09/2019 Benchmark type analysis for SPRFMO 2019; includes China in CPUE series; 
+#            uses only data from SPRFMO secretariat
+# 19/09/2019 included comparison with old Chinese CPUE series
+# 25/09/2019 final checking of code and results
+# 05/10/2019 adapted to include preliminary 2019 data
+# 11/08/2020 updated with official data until 2019
+# ---------------------------------------------------------------------------------------
+
+# Copy folder structure
+# XCOPY "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2020" "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2021"  /T /E
+
+
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE,	message = FALSE,	warning = FALSE,	comment = "",	crop = TRUE )
+knitr::opts_chunk$set(fig.width=10) 
+knit_hooks$set(crop = hook_pdfcrop)
+
+rm(list=ls())
+
+options(max.print=1000000)
+
+# Libraries
+library(rmarkdown)     # rmarkdown functionality
+library(pander)        # tables
+library(lubridate)     # data handling
+library(reshape2)      # reshaping data; e.g. cast
+library(readxl)        # excel reader
+library(broom)         # clean up statistics
+library(scales)        # pretty scales
+library(stringr)       # string manipulations
+library(tidyverse)     # combined package of dplyr, tidyr, ggplot, readr, purrr and tibble
+library(mgcv)          # tensor spline for gam
+library(lme4)
+library(MASS)
+library(captioner)    # captioning of figures and tables
+# library(ggplotify)     # capture graphics as grob/ggplots
+library(mgcViz)         # GAM output to ggplot
+
+# Source my personal utilities
+source("../../prf/r/my utils.R")
+source("../../gisland/r/geo_inside.R")
+
+# default settings for tables
+panderOptions('table.alignment.default', function(df) ifelse(sapply(df, is.numeric), 'right', 'left'))
+
+# To number figures and tables
+fig_nums <- captioner::captioner(prefix = "Figure ")
+tab_nums <- captioner::captioner(prefix = "Table ")
+
+# set paths
+onedrive       <- get_onedrive() 
+data_path      <- "C:/DATA/Onedrive - PFA/Documents/SPRFMO/data submissions/Data submission 2021/CPUE"
+wg_path        <- "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2021/JM/04 Data/CPUE"
+prev_wg_path   <- "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2020/JM/04 Data/CPUE"
+# dropbox   <- file.path(get_dropbox(),"jurel","archiv", "SC06_2018")
+
+# load spatial data
+load(file.path(onedrive,"rdata/world.df.RData"))
+load(file.path(onedrive,"rdata/fao.df.RData"))
+# load(file.path(onedrive,"rdata/eez.df.RData"))
+# load(file.path(onedrive,"rdata/fao.RData"))
+# load(file.path(onedrive,"rdata/eez.RData"))
+load(file.path(onedrive,"rdata/fao.RData"))
+
+
+# year settings
+fy <- 2008
+ly <- 2020
+ay <- 2021
+
+# Load the El Nino data  https://psl.noaa.gov/data/correlation/oni.data 
+elnino <- 
+  read_excel(path=file.path(data_path, "elnino 20210813.xlsx"), 
+             col_names = TRUE,
+             sheet="data") %>% 
+  lowcase() %>% 
+  gather(key=month, value=sst, m1:m12) %>% 
+  mutate(month = as.numeric(gsub("m","", month))) %>% 
+  filter(!is.na(sst)) %>% 
+  mutate(ELE   = 0, 
+         ELE   = ifelse(sst <= -0.5, -1, ELE),
+         ELE   = ifelse(sst >= 0.5 ,  1, ELE)) %>% 
+  arrange(year, month)
+
+# Load the Humbold Current Index (Easter Island-Antofagasta) http://www.bluewater.cl/HCI/HCI_v.csv
+
+hci <-
+  read.csv(file=file.path(data_path,"HCI_v 20210813.csv"), skip=2, header=TRUE) %>% 
+  lowcase() %>% 
+  filter(!is.na(hci))
+
+# Source the Offshore CPUE reader to read in all the CPUE data
+# NOTE: update with the right filename
+source("Offshore CPUE reader only from SPRFMO.r")
+
+# create offshore_all object with environmental data
+offshore_all <-
+  offshore_all %>% 
+  # get(load(file.path(data_path, "offshore_all_sprfmo 2021.RData"))) %>% 
+  left_join(elnino, by=c("year","month")) %>% 
+  left_join(hci, by=c("year","month")) %>% 
+  mutate(shootlon = ifelse(shootlon == 0, NA, shootlon),
+         shootlat = ifelse(shootlat == 0, NA, shootlat))
+
+# overview by species
+# offshore_all %>% 
+#   filter(vesselcp=="EU") %>% 
+#   group_by(year, vesselcountry, species) %>% 
+#   summarise(catch = sum(catch, na.rm=TRUE)) %>% 
+#   dcast(year ~ species, value.var = "catch", sum, margins=TRUE) %>% 
+#   View()
+
+# create cjm by hour (for CPUE analysis)
+cjm_byhour <-
+  offshore_all %>% 
+  filter(species  == "CJM") %>% 
+  filter(year %in% fy:ly) %>% 
+  
+  # remove very small (artificial) durations
+  filter(duration > 0.005) %>% 
+  
+  group_by (vesselcp, vesselcode2, shootdatetime, year, month, day, species) %>% 
+  summarize(catch    = sum(catch, na.rm=TRUE),
+            effort   = sum(duration, na.rm=TRUE),
+            shootlat = mean(shootlat, na.rm=TRUE),
+            shootlon = mean(shootlon, na.rm=TRUE),
+            sst      = mean(sst, na.rm=TRUE),
+            ELE      = mean(ELE, na.rm=TRUE),
+            hci      = mean(hci, na.rm=TRUE)) %>% 
+  mutate(catch        = round(catch),
+         lcatch      = log(catch + 0.1),
+         effort      = ifelse(!is.na(effort) & effort > 0, effort, NA),
+         cpue        = ifelse(!is.na(effort) & effort > 0, catch/effort, NA),
+         lcpue       = ifelse(!is.na(effort), log(catch/effort+0.1), NA)) %>% 
+  ungroup() %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
+  drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
+            "shootlat","shootlon","sst","ELE", "hci"))
+
+# cjm_byhour %>% filter(year == 2019) %>% View()
+
+# offshore_all %>% filter(vesselcp=="EU" & year == 2008) %>% count_not_na() # ggplot(aes(effort)) + geom_histogram()
+# offshore_all %>% filter(vesselcp=="EU" & year == 2008) %>% filter(is.na(duration)) %>% View()
+# cjm_byhour %>% ggplot(aes(effort)) + geom_histogram() + facet_wrap(~year)
+
+
+# cjm by day (for CPUE analysis)
+cjm_byday <-
+  
+  offshore_all %>% 
+  filter(species  == "CJM") %>% 
+  filter(year %in% fy:ly) %>% 
+  
+  group_by(vesselcp, vesselcode2, year, month, day, species) %>% 
+  summarize(catch    = sum(catch, na.rm=TRUE),
+            shootlat = mean(shootlat, na.rm=TRUE),
+            shootlon = mean(shootlon, na.rm=TRUE),
+            sst      = mean(sst, na.rm=TRUE),
+            ELE      = mean(ELE, na.rm=TRUE),
+            hci      = mean(hci, na.rm=TRUE)) %>% 
+  mutate(catch        = round(catch),
+         lcatch      = log(catch + 0.1),
+         effort      = 1,
+         cpue        = catch,
+         lcpue       = log(catch + 0.1)) %>% 
+  ungroup() %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
+  drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
+            "shootlat","shootlon","sst","ELE", "hci"))
+
+# cjm_byday %>% ggplot(aes(cpue)) + geom_histogram() + facet_wrap(~year)
+# offshore_all %>% filter(catch==0, vesselcp=="EU") %>% group_by(vesselcp, year) %>% summarize(n=n()) %>% View()
+# offshore_all %>% filter(catch==0, vesselcp=="EU") %>% group_by(vesselcp, year, vesselname) %>% summarize(n=n()) %>% View()
+# offshore_all %>% filter(catch==0, vesselcp=="EU", species=="CJM") %>%  View()
+
+# cjm by day (for CPUE analysis)
+cjm_byweek <-
+  offshore_all %>% 
+  filter(species == "CJM") %>% 
+  # filter(vesselcp != "KOR") %>% 
+  filter(year %in% (fy:ly)) %>% 
+  mutate(week        = week(shootdatetime)) %>% 
+  group_by(vesselcp, vesselcode2, year, month, week, species) %>% 
+  summarize(catch    = sum(catch, na.rm=TRUE),
+            effort   = n_distinct(day),
+            shootlat = mean(shootlat, na.rm=TRUE),
+            shootlon = mean(shootlon, na.rm=TRUE),
+            sst      = mean(sst, na.rm=TRUE),
+            ELE      = mean(ELE, na.rm=TRUE),
+            hci      = mean(hci, na.rm=TRUE)) %>% 
+  mutate(catch        = round(catch),
+         lcatch      = log(catch + 0.1),
+         cpue        = catch / effort, 
+         lcpue       = log(catch/effort + 0.1)) %>% 
+  ungroup() %>% 
+  filter(catch > 0) %>%            # if no catch during a week, this is suspicious ?? CHECK!
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
+  drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
+            "shootlat","shootlon","sst","ELE", "hci"))
+
+# Save data
+save(offshore_all, cjm_byday, cjm_byhour, cjm_byweek, elnino, hci,
+     file=file.path(data_path, "Offshore_all_data 2021.RData"))
+
+
+# Calculate means for the prediction variables
+mean_month <-
+  cjm_byday %>% 
+  group_by(month) %>% 
+  summarize(lcpue = mean(lcpue, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(lcpue2 = abs(lcpue - mean(lcpue, na.rm=TRUE))) %>% 
+  arrange(lcpue2) %>% 
+  filter(row_number() == 1)
+
+mean_vessel <-
+  cjm_byday %>% 
+  group_by(vesselcode2) %>% 
+  summarize(lcpue = mean(lcpue, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(lcpue2 = abs(lcpue - mean(lcpue, na.rm=TRUE))) %>% 
+  arrange(lcpue2) %>% 
+  filter(row_number() == 1)
+
+# Load the CPUE index calculated the previous year
+oldindex <-
+  read.csv(file.path(prev_wg_path, "Offshore fleet standardized CPUE 2008-2019.csv"), stringsAsFactors = FALSE) %>% 
+  mutate(assessmentyear = as.character(assessmentyear))
+
+
+```
+
+9th MEETING OF THE SCIENTIFIC COMMITTEE
+
+Videomeeting, 27 September - 3 October 2021
+
+SC9-JM02
+
+**CPUE standardization for the offshore fleet fishing for Jack mackerel in the SPRFMO area**
+
+European Union
+
+Corresponding author: mpastoors@pelagicfish.eu
+
+`r format(Sys.time(), '%d/%m/%Y')`
+
+
+**Abstract**
+
+Prior to 2018 two offshore CPUE series have been used in the assessment of Jack Mackerel: the standardized Chinese CPUE and the nominal offshore fleet CPUE (EU, Vanuatu, Korea, Russia). During the benchmark assessment of 2018, the nominal offshore CPUE has been converted into a standardized CPUE series. This working document presents the updated results of a fully combined and standardized Offshore CPUE index that is based on the haul-by-haul data of China, EU, Korea, Vanuatu and Russia as contained in the SPRFMO database. Permission to utilize that information was granted by the respective Contracting Parties  while the analysis was carried out by scientists from the EU delegation. The standardization procedure is identical to the procedure followed during the benchmark in 2018. 
+
+The working document consists of a description of the data available for the analysis and the method used to generate the standardized CPUE index. The final GAM model consists of a number of discrete factors (year, vessel, month and El Nino Effect) and a smoothed interaction between latitude and longitude. 
+
+Of the offshore fleets, only the Russian federation has been fishing during the year of the Covid pandemic (2020). When preparing the CPUE analysis for SC9, it was found that the modelling approach was sensitive to this exceptional situation. The modelling approach has been to use GAM models to assess the dependency on the weekly catch of jack mackerel on different variables. The same explanatory variables have been used as determined during the benchmark in 2018. The GAM model consisted of catch (per week) as the main variable, the year effect (as factor) as the main explanatory variable and the log of effort as the offset (the log is taken because of the log-link function). In the model up to SC8 (2020), the other explanatory variables were vessel, month, lat-long (with spatial smoother) and El Nino Effect (ELE).  
+
+In preparing for SC9 (2021), it was found that this model did no longer perform as anticipated. Possibly due to a very low number of observations during 2020 (due to Covid), the estimated CPUE and confidence intervals for 2020 were identical to the values estimated for the first year in the time series. It was hypothesized that this error could be generated by the relatively large number of vessels (and thereby degrees of freedom) used in the model. A new CPUE model was then tested in which the explanatory factor vessel was replaced by the explanatory variable contracting party. The rationale behind this change was that the trends in CPUE by contracting party are largely similar to the trend in CPUE in vessels within contracting party. 
+
+Comparisons are presented between the 'old' CPUE model (by vessel) and the 'new' CPUE model (by contracting party) and between the 2020 CPUE model (from SC8) and the 'new' 2021 CPUE model.      
+
+<!--1. Introduction ------------------------------------------------------ -->
+
+# Introduction
+
+The assessment of Jack Mackerel in the southern Pacific is based on many different sources of information, including two standardized Catch per Unit Effort time series for China and for other Offshore fleets. Because both fleets are basically operating a similar type of fishery, it was suggested to combine the two fleets into one overarching offshore fleet. With the availability of the Chinese CPUE data, this analysis has now been performed. The standardization approach is identical to the standardization reported in 2018 for the offshore fleet (SC, 2013). Data has been obtained from the SPRFMO secretariat after permission was granted by the different contracting parties that the data could be used for this CPUE analysis. 
+
+<!--2. Material and methods ------------------------------------------------------ -->
+
+# Material and methods
+
+Data from EU, Korea, Russia, Vanuatu and China was made available by the SPRFMO secretariat on 8th July 2021. Two vessels were removed from the dataset because of apparent problems with the units used for catch reporting. During 2020, due to the COVID pandemic, only Russia fished for Jack mackerel in the SPRFMO area.  
+
+Below, summary information by year and contracting party is presented for: 
+* number of vessels participating in the fishery
+* total catch of jack mackerel
+* number of fishing days
+* mean catch of jack mackerel per day
+
+**Number of vessels participating in the fishery**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "nvessels", 
+         caption = "Number of vessels participating in the Jack mackerel fishery by Contracting Party",
+         display = FALSE)
+
+# number of vessels
+
+offshore_all %>%
+  filter(species == "CJM") %>% 
+  group_by(vesselcp, vesselcode2, year) %>% 
+  filter(row_number() == 1) %>% 
+  group_by(vesselcp, year) %>% 
+  summarize(nvessels = n()) %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="nvessels", sum, margins="vesselcp") %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("nvessels")`*
+
+\newpage
+
+**Total catch of jack mackerel per year**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "cjmcatch", 
+         caption = "Total catch of Jack mackerel by contracting party",
+         display = FALSE)
+
+
+# summed catch of CJM
+offshore_all %>% 
+  filter(species == "CJM") %>% 
+  
+  group_by(vesselcp, year, species) %>% 
+  summarize(catch = sum(catch, na.rm=TRUE)) %>% 
+  
+  ungroup() %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="catch", sum, margins=c("vesselcp", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+# summed catch of EU
+# offshore_all %>% 
+#   filter(vesselcp == "EU") %>% 
+#   mutate(division   = geo_inside(lon=shootlon, lat=shootlat, map=fao[fao@data$F_LEVEL=="DIVISION",], variable="F_DIVISION")) %>%
+# 
+#   
+#   group_by(vesselcp, year, division,  species) %>% 
+#   summarize(catch = sum(catch, na.rm=TRUE)) %>% 
+#   
+#   group_by(vesselcp, species) %>% 
+#   filter(sum(catch, na.rm=TRUE) > 1000) %>% 
+#   
+#   ungroup() %>% 
+#   
+#   mutate(year = as.character(year)) %>% 
+#   dcast(vesselcp+species+year ~ division, value.var="catch", sum, margins=c("species", "division")) %>% 
+# 
+#   # writexl::write_xlsx(path="eu_sprfmo.xlsx")
+#   
+#   group_by(vesselcp, species) %>% 
+#   do(add_row(., .after=0)) %>%    
+#   
+# 
+#   pandoc.table(., 
+#                style        = "simple",
+#                split.tables = 100, 
+#                split.cells  = c(rep(7,10)),
+#                justify      = "right",
+#                missing      =".",
+#                big.mark     = ',', 
+#                round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("cjmcatch")`*
+
+\newpage
+
+**Number of fishing days**
+
+Number of days when at least one haul has been reported. 
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "fishingdays", 
+         caption = "Number of fishing days by contracting party",
+         display = FALSE)
+
+# Number of fishing days
+
+offshore_all %>% 
+  group_by(vesselname, shootdatetime, shootlat, shootlon) %>% 
+  filter(row_number() == 1) %>% 
+  
+  # fishing days by vessel
+  group_by(vesselcp, vesselname, year) %>% 
+  summarize(fishingdays = n_distinct(day)) %>% 
+  
+  # fishing days by CP
+  group_by(vesselcp, year) %>% 
+  summarize(fishingdays = sum(fishingdays, na.rm=TRUE)) %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="fishingdays", sum, margins=c("vesselcp", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("fishingdays")`*
+
+
+\newpage
+
+**Mean catch per day of jack mackerel**
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "meancatchperday", 
+         caption = "Mean catch per day of Jack Mackerel",
+         display = FALSE)
+
+# CPUE per day averaged by year
+
+cjm_byday %>% 
+# offshore_all %>%
+  filter(species == "CJM") %>%
+
+  group_by(vesselcp, vesselcode2, year, day, species) %>% 
+  summarize(cpue = sum(catch, na.rm=TRUE)) %>% 
+  
+  group_by(vesselcp, year, species) %>% 
+  summarize(cpue = mean(cpue, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  
+  mutate(year = as.character(year)) %>% 
+  dcast(year ~ vesselcp, value.var="cpue", mean, margins=c("vesselcp", "year")) %>% 
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+# offshore_all %>%
+#   filter(species == "CJM") %>% 
+#   group_by(vesselcode, year, day) %>% 
+#   summarize(catch = sum(catch, na.rm=TRUE)) %>% 
+#   group_by(vesselcode) %>% 
+#   summarize(catch = mean(catch)) %>% 
+#   arrange(-catch) %>% 
+#   View()
+
+```
+
+*`r tab_nums("meancatchperday")`*
+
+\newpage
+
+**Haul positions by contracting party and year**
+
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(name    = "haulpositionsbyyear", 
+         caption = "Haul positions where Jack mackerel has been caught (by year). Colours indicate the different contracting parties",
+         display = FALSE)
+
+invisible(gc())
+
+cjm_byhour %>% 
+  # offshore_all %>% 
+  # filter(species == "CJM") %>% 
+  filter(!is.na(shootlon) | !is.na(shootlat)) %>% 
+  filter(!is.na(year)) %>% 
+
+  ggplot(aes(x=shootlon, y=shootlat)) +
+  theme_publication() +
+  theme(axis.title       = element_blank(), 
+        text             = element_text(size=12),
+        legend.key.width = unit(1, "cm"),
+        panel.spacing    = unit(0.1, "lines") ) +  
+  
+  coord_quickmap(xlim=c(-120,-50) , ylim=c(-50,-10)) +
+  geom_polygon(data=world.df, aes(long,lat,group=group), 
+               fill="cornsilk", size=0.25,color="gray15", alpha=0.7) +
+  
+  geom_point(aes(colour=vesselcp), size=0.8, alpha=0.4) +
+  
+  ggtitle("CJM haul positions by year") +
+  facet_wrap(~year, ncol=4)
+  # facet_grid(rows=vars(vesselcp), cols= vars(year), drop=FALSE)
+
+```
+
+*`r fig_nums("haulpositionsbyyear")`*
+
+\newpage
+
+**Jack mackerel Log CPUE by week and yearly average Log CPUE**
+
+The plot below shows the distributions of log CPUE by week and by contracting party. Log CPUE was calculated as the log of catch per week divided by the number of fishing days per week. The average log CPUE is drawn as a dashed black line. The colours indicate the different individual vessels that generated the CPUE. This shows that the trend in CPUE by individual vessel is largely consistent with the trend in CPUE by contracting party.     
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "lcpuebyweek", 
+  caption = "Jack mackerel log CPUE (log(catch / ndays)) by week.",
+  display = FALSE)
+
+invisible(gc())
+
+m <-
+  cjm_byweek %>% 
+  group_by(vesselcp, year) %>%
+  summarise(lcatch   = mean(lcpue, na.rm=TRUE), 
+            week     = mean(week, na.rm=TRUE)) %>% 
+  mutate(date = as.numeric(as.character(year)) + week/52) %>% 
+  data.frame() 
+
+# cjm_byweek %>%
+#   mutate(date   = as.numeric(as.character(year)) + week/52,
+#          lcatch = lcpue) %>%
+# 
+#   # mutate(date   = as.numeric(as.character(year)) + week/52,
+#   #        lcatch = log(catch + 0.1)) %>%
+#   
+#   ggplot(aes(date, lcatch)) +
+#   theme_publication() +
+#   # theme(legend.position="none")+
+#   geom_jitter(aes(colour=vesselcp)) +
+#   geom_line(data=m, aes(date, lcatch), colour="gray20", linetype="dashed", size=1) +
+#   geom_point(data=m, aes(date, lcatch)) +
+#   scale_x_continuous(breaks=seq(fy, ly, by = 2)) +
+#   facet_wrap(~vesselcp)
+
+# by vessel
+cjm_byweek %>%
+  mutate(date   = as.numeric(as.character(year)) + week/52,
+         lcatch = lcpue) %>%
+
+  # mutate(date   = as.numeric(as.character(year)) + week/52,
+  #        lcatch = log(catch + 0.1)) %>%
+  
+  ggplot(aes(date, lcatch)) +
+  theme_publication() +
+  theme(legend.position="none")+
+  geom_jitter(aes(colour=vesselcode2)) +
+  geom_line(data=m, aes(date, lcatch), colour="gray20", linetype="dashed", size=1) +
+  geom_point(data=m, aes(date, lcatch)) +
+  scale_x_continuous(breaks=seq(fy, ly, by = 2)) +
+  guides(colour = guide_legend(nrow = 3)) +
+  facet_wrap(~vesselcp, ncol=2)
+# cjm_byweek %>%
+#   mutate(date   = as.numeric(as.character(year)) + week/52,
+#          lcatch = lcpue) %>%
+#   filter(vesselcp=="EU") %>% 
+#   ggplot(aes(date, lcatch)) +
+#   theme_publication() +
+#   geom_jitter(aes(colour=vesselcode2)) +
+#   scale_x_continuous(breaks=seq(fy, ly, by = 2)) +
+#   facet_wrap(~vesselcode2)
+
+
+```
+
+*`r fig_nums("lcpuebyweek")`*
+
+
+\newpage
+
+**El Nino effect and Humbold_current index**
+
+It has been hypothesized that the catch rate of jack mackerel by area and season could be dependent on the climatic situation, characterized by El Nino events (NOAA,  https://www.esrl.noaa.gov/psd/data/correlation/oni.data) or the Humboldt Current Index (http://www.bluewater.cl/HCI/)
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "elnino", 
+  caption = "El Nino temperature anomaly (blue line) and ELE indicator (red line). Humboldt Current Index (green line)",
+  display = FALSE)
+
+invisible(gc())
+
+elnino %>% 
+  left_join(hci, by=c("year","month")) %>% 
+  mutate(date = year + (month-1)/12) %>% 
+  filter(year >= fy & year <= ly) %>% 
+  
+  ggplot(aes(date, sst) ) +
+  theme_publication() +
+  # theme(legend.position="none") +
+  geom_point(alpha=0.5, colour="blue") +
+  geom_line(colour="blue") +
+  geom_line(aes(y=ELE), colour="red") +
+  
+  geom_point(aes(y=hci), alpha=0.5, colour="green") +
+  geom_line(aes(y=hci), colour="green") +
+  geom_smooth(aes(y=hci), colour="green", span=0.2, se=FALSE) +
+  
+  scale_x_continuous(breaks = seq(fy, ly, by = 2)) 
+
+
+```
+
+*`r fig_nums("elnino")`*
+
+
+\newpage
+
+
+# Results
+
+The modelling approach has been to use GAM models to assess the dependency on the weekly catch of jack mackerel on different variables. The same explanatory variables have been used as determined during the benchmark in 2018. The GAM model consists of catch (per week) as the main variable, the year effect (as factor) as the main explanatory variable and the log of effort as the offset (the log is taken because of the log-link function). 
+
+In the model up to SC8 (2020), the other explanatory variables were vessel, month, lat-long (with spatial smoother) and El Nino Effect (ELE), so that the final model was: 
+
+*Catch ~ offset(log(effort)) + year + vessel + month + s(lat-lon) + ELE*
+
+In preparing for SC9 (2021), it was found that this model did no longer perform as anticipated. Possibly due to a very low number of observations during 2020 (due to Covid), the estimated CPUE and confidence intervals for 2020 were identical to the values estimated for the first year in the time series. It was hypothesized that this error could be generated by the relatively large number of vessels (and thereby degrees of freedom) used in the model. A new CPUE model was then tested in which the explanatory factor vessel was replaced by the contracting party. The rationale behind this change can be seen in `r fig_nums("lcpuebyweek", display = "cite")` where the trends in CPUE by contracting party are largely similar to the trend in CPUE in vessels within contracting party. The new final model is:
+
+*Catch ~ offset(log(effort)) + year + vesselcp + month + s(lat-lon) + ELE*
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "oldmodeleffects", 
+  caption = "Jack mackerel 'old' GAM model estimates for selected effects",
+  display = FALSE)
+
+# old model
+
+old     <- formula(paste("catch ~ year + vesselcode2 + month + s(shootlon,shootlat) + ELE +
+                           offset(log(effort))"))
+oldformglm <-
+  formula(paste("catch ~ year + month + vesselcode2 + shootlon*shootlat + ELE + offset(log(effort))"))
+
+oldfinalMod  <- gam(old, data=cjm_byweek,
+                 family=negbin(glm.nb(oldformglm,data=cjm_byweek)$theta))
+
+oldnewdat    <- expand.grid(
+  year        = as.factor(fy:ly),
+  month       = as.factor(3),
+  shootlon    = quantile(cjm_byweek$shootlon,probs=c(0.5)),
+  shootlat    = quantile(cjm_byweek$shootlat,probs=c(0.5)),
+  ELE         = as.factor(0),
+  vesselcode2 = names(rev(sort(colSums(table(cjm_byweek$year,cjm_byweek$vesselcode2)))))[1], effort=7)
+
+# calculate the predicted values and confidence intervals
+pred      <- predict(oldfinalMod, oldnewdat,se.fit=T,type="link")
+upr       <- exp(pred$fit + (1.96 * pred$se.fit))
+lwr       <- exp(pred$fit - (1.96 * pred$se.fit))
+
+# create df
+olddf        <- data.frame(
+               cpue = exp(pred$fit),
+               upr  = upr, 
+               lwr  = lwr,
+               year = fy:ly,
+               type = "standardized",
+               assessmentyear = paste0(as.character(ay),"old"), 
+               stringsAsFactors = FALSE) 
+
+# new final model
+
+final     <- formula(paste("catch ~ year + vesselcp + month + s(shootlon,shootlat) + ELE +
+                           offset(log(effort))"))
+formglm <-
+  formula(paste("catch ~ year + month + vesselcp + shootlon*shootlat + ELE + offset(log(effort))"))
+
+newdat    <- expand.grid(
+  year        = as.factor(fy:ly),
+  month       = as.factor(3),
+  shootlon    = quantile(cjm_byweek$shootlon,probs=c(0.5)),
+  shootlat    = quantile(cjm_byweek$shootlat,probs=c(0.5)),
+  ELE         = as.factor(0),
+  vesselcp    = "EU",
+  effort      = 7)
+
+finalMod  <- gam(final, data=cjm_byweek,
+                 family=negbin(glm.nb(formglm,data=cjm_byweek)$theta))
+
+# calculate the predicted values and confidence intervals
+pred      <- predict(finalMod,newdat,se.fit=T,type="link")
+upr       <- exp(pred$fit + (1.96 * pred$se.fit))
+lwr       <- exp(pred$fit - (1.96 * pred$se.fit))
+
+# create df
+df        <- data.frame(
+               cpue = exp(pred$fit),
+               upr  = upr, 
+               lwr  = lwr,
+               year = fy:ly,
+               type = "standardized",
+               assessmentyear = as.character(ay), 
+               stringsAsFactors = FALSE) 
+
+# plot the estimates of the different effects
+plot.gam(finalMod, all.terms=T, page=1)
+plot.gamViz(finalMod, select=1)
+
+# print(plot.gamViz(finalMod, allTerms = TRUE), pages=1)
+# t <- plot.gamViz(finalMod, allTerms = TRUE)
+# t1 <- plot.gamViz(finalMod, allTerms = TRUE)$plots[1]
+# t2 <- plot.gamViz(finalMod, allTerms = TRUE)$plots[2]
+# t3 <- plot.gamViz(finalMod, allTerms = TRUE)$plots[3]
+# t4 <- plot.gamViz(finalMod, allTerms = TRUE)$plots[4]
+# t5 <- plot.gamViz(finalMod, allTerms = TRUE)$plots[5]
+
+
+
+
+
+
+```
+
+*`r fig_nums("finalmodeleffects")`*
+
+\newpage
+
+*Comparing trends in CPUE*
+
+In the plot below, comparisons are presented between the 'old' CPUE model (by vessel) and the 'new' CPUE model (by contracting party) and between the 2020 CPUE model (from SC8) and the 'new' 2021 CPUE model (for SC9). Not that the 'old' CPUE model has estimated CPUE and confidence intervals for 2020 identical to the 2008 due to an apparent error in the model. 
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "cpueindexplot", 
+  caption = "GAM standardized offshore fleet CPUE for jack mackerel. Top: comparison of 'old' CPUE model estimated by vessel with 'new' CPUE model by contracting party. Bottom: comparison of 2020 CPUE model with the 'new' 2021 CPUE model",
+  display = FALSE)
+
+# old vs new model 2021
+bind_rows(olddf, df) %>% 
+  mutate(type = "old vs new model") %>% 
+  ggplot(aes(x=year, y=cpue, group=assessmentyear)) +
+  theme_publication() +
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=factor(assessmentyear)), alpha=0.2) +
+  geom_line(aes(colour=factor(assessmentyear)), size=1) +
+  expand_limits(y=0) +
+  labs(y="cpue") +
+  scale_x_continuous(breaks= seq(fy,ly,1)) +
+  facet_wrap(~type, scales = "free_y")
+
+# 2021 vs 2020 model
+bind_rows(oldindex, df) %>% 
+  mutate(type = "2021 vs 2020 model") %>% 
+  ggplot(aes(x=year, y=cpue, group=assessmentyear)) +
+  theme_publication() +
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=factor(assessmentyear)), alpha=0.2) +
+  geom_line(aes(colour=factor(assessmentyear)), size=1) +
+  expand_limits(y=0) +
+  labs(y="cpue") +
+  scale_x_continuous(breaks= seq(fy,ly,1)) +
+  facet_wrap(~type, scales = "free_y")
+
+```
+
+*`r fig_nums("cpueindexplot")`*
+
+\newpage
+
+*Model diagnostics*
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+tab_nums(
+  name    = "anovafinalmod", 
+  caption = "ANOVA results with final model GAM",
+  display = FALSE)
+
+# print ANOVA tables
+anova(finalMod)
+
+# print(plot.gamViz(store[["formgamy"]]), pages=1)
+
+```
+
+*`r tab_nums("anovafinalmod")`*
+
+\newpage
+
+*Jack mackerel standardized CPUE index* 
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+tab_nums(
+  name    = "cpueindextable", 
+  caption = "GAM standardized offshore fleet CPUE for jack mackerel",
+  display = FALSE)
+
+df %>% 
+  filter(type == "standardized") %>% 
+  mutate_at(c("cpue","upr","lwr"), list(as.integer)) %>% 
+  dplyr::select(year, cpue, lwr, upr) %>% 
+  print(row.names=FALSE)
+
+# save to csv
+df %>% 
+  filter(type=="standardized") %>% 
+  write.csv(file=file.path(data_path, 
+                           paste0("Offshore fleet standardized CPUE ",fy,"-",ly,".csv")), 
+            row.names = FALSE)
+
+```
+
+*`r tab_nums("cpueindextable")`*
+
+
+<!--4. Discussion and conclusions ------------------------------------------------------ -->
+
+# Discussion and conclusions
+
+This working document describes the standardized CPUE for the offshore fleets (China, EU, Korea, vanuatu and Russia) based on the haul-by-haul data contained in the SPRFMO database. Permission to utilize that information was granted by the delegations of the contracting parties while the analysis was carried out by scientists from the EU delegation. 
+
+The modelling approach has been to use GAM models to assess the dependency on the weekly catch of jack mackerel on different variables. The same explanatory variables have been used as determined during the benchmark in 2018. The GAM model consists of catch (per week) as the main variable, the year effect (as factor) as the main explanatory variable and the log of effort as the offset (the log is taken because of the log-link function). 
+
+In the model up to SC8 (2020), the other explanatory variables were vessel, month, lat-long (with spatial smoother) and El Nino Effect (ELE), so that the final model was: 
+
+*Catch ~ offset(log(effort)) + year + vessel + month + s(lat-lon) + ELE*
+
+In preparing for SC9 (2021), it was found that this model did no longer perform as anticipated. Possibly due to a very low number of observations during 2020 (due to Covid), the estimated CPUE and confidence intervals for 2020 were identical to the values estimated for the first year in the time series. It was hypothesized that this error could be generated by the relatively large number of vessels (and thereby degrees of freedom) used in the model. A new CPUE model was then tested in which the explanatory factor vessel was replaced by the contracting party. The rationale behind this change can be seen in `r fig_nums("lcpuebyweek", display = "cite")` where the trends in CPUE by contracting party are largely similar to the trend in CPUE in vessels within contracting party. The new final model is:
+
+*Catch ~ offset(log(effort)) + year + vesselcp + month + s(lat-lon) + ELE*
+
+Comparisons are presented between the 'old' CPUE model (by vessel) and the 'new' CPUE model (by contracting party) and between the 2020 CPUE model (from SC8) and the 'new' 2021 CPUE model (`r fig_nums("cpueindexplot", display = "cite")`) .  
+
+
+<!--5. Acknowledgements ------------------------------------------------------ -->
+
+# Acknowledgements
+
+We would like to acknowledge the permission granted by the delegations of China, Russia, Vanuatu and Korea to utilize their haul-by-haul data for the analysis of standardized CPUE of the offshore fleet fishing for Jack mackerel. Sharing access to vessel data has made it possible to improve the indicator that can be used in the assessment. 
+
+<!--6. References ------------------------------------------------------ -->
+
+# References
+
+Li, G., X. Zou, X. Chen, Y. Zhou and M. Zhang (2013). "Standardization of CPUE for Chilean jack mackerel (Trachurus murphyi) from Chinese trawl fleets in the high seas of the Southeast Pacific Ocean." Journal of Ocean University of China 12(3): 441-451.
+
+SPRFMO (2011) Report of the Jack Mackerel Subgroup. Tenth Science Working Group of SPRFMO, 19 – 23 September 2011, Port Vila, Vanuatu.
+
+SPRFMO (2018) CPUE standardization for the offshore fleet fishing for Jack mackerel in the SPRFMO area (SCW6-Doc05). Sixth Science Committee Workshop, 28-30 May 2018, Valparaiso, Chile.
+

@@ -47,7 +47,8 @@
 # -----------------------------------------------------------------------------------
 
 # fn <- "Offshorefleets 20190801.xlsx"
-fn <- "Offshorefleets 20200803.xlsx"
+# fn <- "Offshorefleets 20200803.xlsx"
+fn <- "Offshorefleets 20210708.xlsx"
 
 offshore_all <-
   read_excel(file.path(data_path,fn), 
@@ -56,7 +57,8 @@ offshore_all <-
              col_types = "text", 
              # range     = "A2:Z2000", # cell_cols("A:V"),
              na        = "",
-             skip      = 0) %>% 
+             skip      = 0,
+             .name_repair = "unique") %>% 
   mutate  (file    = fn) %>%
   lowcase() %>% 
   rename(
@@ -154,8 +156,6 @@ sprfmo_vesselcodes <-
 offshore_all <-
   offshore_all %>% 
   left_join(sprfmo_vesselcodes, by=c("vesselname", "vesselcp"))
-
-save(offshore_all, file=file.path(data_path, "Offshore_all_sprfmo.RData"))
 
 # CHECKS
 

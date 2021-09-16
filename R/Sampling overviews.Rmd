@@ -1,0 +1,266 @@
+---
+output: 
+  word_document:
+    reference_docx:  ../PFA_report_template_v1.7.dotx
+---
+
+```{r setup, include=FALSE}
+
+# ==================================================================
+# SPRFMO sampling overviews (SC8 2020)
+#
+# 04/10/2020: first coding
+# ==================================================================
+
+# Reset lists
+rm(list=ls())
+
+# general libraries
+library(readxl)        # excel reader from hadley; much quicker than the java based excel readers
+library(lubridate)     # data and time functions
+library(stringr)       # string manipulation
+library(pander)        # for tables
+library(reshape2)      # cast and melt dataframes
+library(scales)        # pretty scales
+library(tidyverse)     # data manipulation and piping
+
+# source utilities
+source("../../prf/r/my utils.R")
+
+
+# Create file list for import 
+file.list   <- c(
+  list.files(path = "D:/TEMP",recursive  = FALSE,pattern = "RData",full.names = TRUE,ignore.case= TRUE) )
+# file.list   <- c(
+#   list.files(path = "C:/Users/Martin Pastoors/PFA/SPRFMO SC8 - Documents/Jack Mackerel/04 Data/ALK2019",
+#              recursive  = FALSE,pattern = "xls",full.names = TRUE,ignore.case= TRUE),
+#   list.files(path = "C:/Users/Martin Pastoors/PFA/SPRFMO SC8 - Documents/Jack Mackerel/04 Data/ALK2019",
+#              recursive  = FALSE,pattern = "xls",full.names = TRUE,ignore.case= TRUE) )
+file.list <- file.list[!grepl("\\~",file.list)]
+
+dfalk <- dfcatch <- dflength <- dfcanum <- dfsampling <- data.frame(stringsAsFactors = FALSE)
+
+for (i in 1:length(file.list)) {
+  load(file.list[i])
+  
+  dfalk <- bind_rows(dfalk, alk)
+  dfcatch <- bind_rows(dfcatch, catch)
+  dflength <- bind_rows(dflength, length)
+  dfcanum <- bind_rows(dfcanum, canum)
+  dfsampling <- bind_rows(dfsampling, sampling)
+}
+
+# save(catch, sampling, length, alk, canum, file=file.path("D:/TEMP",fn))
+save(dfcatch, dfsampling, dflength, dfalk, dfcanum, file=file.path("D:/TEMP","ALK data combined.RData"))
+
+```
+
+8th MEETING OF THE SCIENTIFIC COMMITTEE
+
+**Overview of catch and sampling data 2017-2019**
+
+Corresponding author: mpastoors@pelagicfish.eu
+
+`r format(Sys.time(), '%d/%m/%Y')`
+
+
+Catch by quarter
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+# plot catch
+dfcatch %>%
+  mutate(value=as.numeric(value)) %>% 
+  mutate(quarter = paste0("Q", quarter)) %>% 
+  mutate(yearquarter = paste0(year, quarter)) %>% 
+  
+  ggplot(aes(x=quarter, y=value, group=member)) + 
+  theme_publication() +
+  theme(panel.spacing     = unit(2, "mm"),
+        legend.key.width  = unit(1, "cm"),
+        legend.title      = element_blank(),
+        panel.grid.minor  = element_blank(),
+        # legend.position = "null",
+        text              = element_text(size=12) ) +
+  
+  labs(x = "quarter", y = "catch") +
+  
+  geom_bar(aes(fill=member), stat="identity", alpha=1) +
+  facet_grid(fleet~year)
+# facet_grid(.~quarter)
+
+```
+
+##### page break
+
+Number of length measurements
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+# plot sampled lengths
+dfsampling %>%
+  filter(variable=="measured") %>% 
+  mutate(value=as.numeric(value)) %>% 
+  
+  group_by(year, quarter, fleet, member) %>% 
+  summarise(value = sum(value, na.rm=TRUE)) %>%
+  
+  mutate(quarter = paste0("Q", quarter)) %>% 
+  mutate(yearquarter = paste0(year, quarter)) %>% 
+  
+  ggplot(aes(x=quarter, y=value, group=member)) + 
+  theme_publication() +
+  theme(panel.spacing     = unit(2, "mm"),
+        legend.key.width  = unit(1, "cm"),
+        legend.title      = element_blank(),
+        panel.grid.minor  = element_blank(),
+        # legend.position = "null",
+        text              = element_text(size=12) ) +
+  
+  labs(x = "quarter", y = "length measurements") +
+  
+  geom_bar(aes(fill=member), stat="identity", alpha=1, position=position_dodge2(width=0.9, preserve="single")) +
+  facet_grid(fleet~year)
+# facet_grid(.~quarter)
+
+```
+
+##### page break
+
+Number of age measurements by year and fleet
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+# plot sampled ages
+dfsampling %>%
+  filter(variable=="aged") %>% 
+  mutate(value=as.numeric(value)) %>% 
+  
+  group_by(year, quarter, fleet, member) %>% 
+  summarise(value = sum(value, na.rm=TRUE)) %>%
+  
+  mutate(quarter = paste0("Q", quarter)) %>% 
+  mutate(yearquarter = paste0(year, quarter)) %>% 
+  
+  ggplot(aes(x=quarter, y=value, group=member)) + 
+  theme_publication() +
+  theme(panel.spacing     = unit(2, "mm"),
+        legend.key.width  = unit(1, "cm"),
+        legend.title      = element_blank(),
+        panel.grid.minor  = element_blank(),
+        # legend.position = "null",
+        text              = element_text(size=12) ) +
+  
+  labs(x = "quarter", y = "age measurements") +
+  
+  geom_bar(aes(fill=member), stat="identity", alpha=1, position=position_dodge2(width=0.9, preserve="single")) +
+  facet_grid(fleet~year)
+# facet_grid(.~quarter)
+
+```
+
+##### page break
+
+ALK
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+# plot age-length keys
+dfalk %>%   
+  # filter(year == 2019) %>% 
+  mutate(age = as.integer(age)) %>% 
+  filter(tolower(lengthtype)=="fork length") %>% 
+  group_by(year, quarter, length, age, fleet, member ) %>% 
+  summarise(value = sum(value, na.rm=TRUE)) %>% 
+  
+  group_by(year, quarter, length, fleet, member ) %>% 
+  mutate(prop = value/sum(value, na.rm=TRUE)) %>% 
+  
+  mutate(quarter = paste0("Q", quarter)) %>% 
+  mutate(yearquarter = paste0(year, quarter)) %>% 
+  
+  ggplot(aes(x=length, y=age, group=quarter)) + 
+  theme_publication() +
+  theme(panel.spacing     = unit(2, "mm"),
+        legend.key.width  = unit(1, "cm"),
+        legend.title      = element_blank(),
+        panel.grid.minor  = element_blank(),
+        # legend.position = "null",
+        text              = element_text(size=12) ) +
+  
+  labs(x = "length", y = "age") +
+  
+  geom_point(aes(size=prop, colour=member), alpha=0.5) +
+  # facet_grid(fleet~quarter)
+  facet_grid(quarter~year)
+
+```
+
+##### page break
+
+CANUM by fleet
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+# plot canum
+dfcanum %>%   
+  # filter(year == myyear) %>%
+  filter(variable == "canum") %>% 
+  mutate(quarter = paste0("Q", quarter)) %>% 
+  mutate(yearquarter = paste0(year, quarter)) %>% 
+  
+  ggplot(aes(x=age, y=value, group=member)) + 
+  theme_publication() +
+  theme(panel.spacing     = unit(2, "mm"),
+        legend.key.width  = unit(1, "cm"),
+        legend.title      = element_blank(),
+        panel.grid.minor  = element_blank(),
+        # legend.position = "null",
+        text              = element_text(size=12) ) +
+  
+  labs(x = "age", y = "canum") +
+  
+  geom_bar(aes(fill=member, group=member), stat="identity", alpha=1) +
+  facet_grid(fleet~year)
+# facet_grid(.~quarter)
+
+
+
+
+
+```
+
+##### page break
+
+CANUM by quarter
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+# plot canum
+dfcanum %>%   
+  # filter(year == myyear) %>%
+  filter(variable == "canum") %>% 
+  mutate(quarter = paste0("Q", quarter)) %>% 
+  mutate(yearquarter = paste0(year, quarter)) %>% 
+  
+  ggplot(aes(x=age, y=value, group=member)) + 
+  theme_publication() +
+  theme(panel.spacing     = unit(2, "mm"),
+        legend.key.width  = unit(1, "cm"),
+        legend.title      = element_blank(),
+        panel.grid.minor  = element_blank(),
+        # legend.position = "null",
+        text              = element_text(size=12) ) +
+  
+  labs(x = "age", y = "canum") +
+  
+  geom_bar(aes(fill=member, group=member), stat="identity", alpha=1) +
+  facet_grid(quarter~year)
+# facet_grid(.~quarter)
+
+
+
+
+
+```
+
