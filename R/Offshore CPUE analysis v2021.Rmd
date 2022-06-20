@@ -63,21 +63,17 @@ panderOptions('table.alignment.default', function(df) ifelse(sapply(df, is.numer
 fig_nums <- captioner::captioner(prefix = "Figure ")
 tab_nums <- captioner::captioner(prefix = "Table ")
 
-# set paths
+# set paths for PFA data
 onedrive       <- get_onedrive() 
-data_path      <- "C:/DATA/Onedrive - PFA/Documents/SPRFMO/data submissions/Data submission 2021/CPUE"
-wg_path        <- "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2021/JM/04 Data/CPUE"
-prev_wg_path   <- "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2020/JM/04 Data/CPUE"
-# dropbox   <- file.path(get_dropbox(),"jurel","archiv", "SC06_2018")
-
-# load spatial data
 load(file.path(onedrive,"rdata/world.df.RData"))
 load(file.path(onedrive,"rdata/fao.df.RData"))
-# load(file.path(onedrive,"rdata/eez.df.RData"))
-# load(file.path(onedrive,"rdata/fao.RData"))
-# load(file.path(onedrive,"rdata/eez.RData"))
 load(file.path(onedrive,"rdata/fao.RData"))
 
+# set paths for SPRFMO data
+onedrive2      <- "C:/Users/Martin/OneDrive - PFA/Documents/SPRFMO"
+data_path      <- file.path(onedrive2, "data submissions/Data submission 2021/CPUE")
+wg_path        <- file.path(onedrive2, "2021/JM/04 Data/CPUE")
+prev_wg_path   <- file.path(onedrive2, "2020/JM/04 Data/CPUE")
 
 # year settings
 fy <- 2008
@@ -117,14 +113,6 @@ offshore_all <-
   left_join(hci, by=c("year","month")) %>% 
   mutate(shootlon = ifelse(shootlon == 0, NA, shootlon),
          shootlat = ifelse(shootlat == 0, NA, shootlat))
-
-# overview by species
-# offshore_all %>% 
-#   filter(vesselcp=="EU") %>% 
-#   group_by(year, vesselcountry, species) %>% 
-#   summarise(catch = sum(catch, na.rm=TRUE)) %>% 
-#   dcast(year ~ species, value.var = "catch", sum, margins=TRUE) %>% 
-#   View()
 
 # create cjm by hour (for CPUE analysis)
 cjm_byhour <-
@@ -215,8 +203,8 @@ cjm_byweek <-
             "shootlat","shootlon","sst","ELE", "hci"))
 
 # Save data
-save(offshore_all, cjm_byday, cjm_byhour, cjm_byweek, elnino, hci,
-     file=file.path(data_path, "Offshore_all_data 2021.RData"))
+# save(offshore_all, cjm_byday, cjm_byhour, cjm_byweek, elnino, hci,
+#      file=file.path(data_path, "Offshore_all_data 2021.RData"))
 
 
 # Calculate means for the prediction variables
@@ -246,13 +234,13 @@ oldindex <-
 
 ```
 
-9th MEETING OF THE SCIENTIFIC COMMITTEE
+JACK MACKEREL BENCHMARK WORKSHOP SCW14 
 
-Videomeeting, 27 September - 3 October 2021
+Seattle, 4-8 July 2022
 
-SC9-JM02
+WD02 
 
-**CPUE standardization for the offshore fleet fishing for Jack mackerel in the SPRFMO area**
+**CPUE standardization for the offshore fleet taking into account increases in efficiency**
 
 European Union
 
@@ -821,7 +809,7 @@ df %>%
 # save to csv
 df %>% 
   filter(type=="standardized") %>% 
-  write.csv(file=file.path(data_path, 
+  write.csv(file=file.path("D:/GIT/jjm/cpue", 
                            paste0("Offshore fleet standardized CPUE ",fy,"-",ly,".csv")), 
             row.names = FALSE)
 

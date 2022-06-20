@@ -1,0 +1,899 @@
+---
+output: 
+  word_document:
+    reference_docx:  ../PFA_report_template_v1.7.dotx
+---
+
+```{r setup, include=FALSE}
+
+# ---------------------------------------------------------------------------------------
+# Jack mackerel CPUE analysis for offshore fleet in SPRFMO area (EU, Russia, Vanuatu, Korea + China) 
+#
+# 23/09/2017 First coding of the CPUE analysis
+# 08/05/2018 Added the fleets of Russia, Vanuatu and Korea
+# 23/05/2018 Added data quality checking
+# 28/05/2018 Version presented at the SPRFMO benchmark
+# 08/08/2018 Version that includes 2017 data
+# 17/09/2019 Benchmark type analysis for SPRFMO 2019; includes China in CPUE series; 
+#            uses only data from SPRFMO secretariat
+# 19/09/2019 included comparison with old Chinese CPUE series
+# 25/09/2019 final checking of code and results
+# 05/10/2019 adapted to include preliminary 2019 data
+# 11/08/2020 updated with official data until 
+# 20/06/2022 added efficiency factors; estimated GLM and GAM using purrr::map functions
+# ---------------------------------------------------------------------------------------
+
+# Copy folder structure
+# XCOPY "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2020" "C:/DATA/Onedrive - PFA/Documents/SPRFMO/2021"  /T /E
+
+
+require("knitr")
+knitr::opts_chunk$set(echo = FALSE,	message = FALSE,	warning = FALSE,	comment = "",	crop = TRUE )
+knitr::opts_chunk$set(fig.width=10) 
+knit_hooks$set(crop = hook_pdfcrop)
+
+rm(list=ls())
+
+options(max.print=1000000)
+
+# Libraries
+library(rmarkdown)     # rmarkdown functionality
+library(pander)        # tables
+library(lubridate)     # data handling
+library(reshape2)      # reshaping data; e.g. cast
+library(readxl)        # excel reader
+library(broom)         # clean up statistics
+library(scales)        # pretty scales
+library(stringr)       # string manipulations
+library(tidyverse)     # combined package of dplyr, tidyr, ggplot, readr, purrr and tibble
+library(mgcv)          # tensor spline for gam
+library(lme4)
+library(MASS)
+library(captioner)    # captioning of figures and tables
+# library(ggplotify)     # capture graphics as grob/ggplots
+library(mgcViz)         # Visualize GAM output to ggplot
+
+# Source my personal utilities
+source("../../prf/r/my utils.R")
+source("../../gisland/r/geo_inside.R")
+
+# default settings for tables
+panderOptions('table.alignment.default', function(df) ifelse(sapply(df, is.numeric), 'right', 'left'))
+
+# To number figures and tables
+fig_nums <- captioner::captioner(prefix = "Figure ")
+tab_nums <- captioner::captioner(prefix = "Table ")
+
+# set paths for PFA data
+onedrive       <- get_onedrive() 
+load(file.path(onedrive,"rdata/world.df.RData"))
+load(file.path(onedrive,"rdata/fao.df.RData"))
+load(file.path(onedrive,"rdata/fao.RData"))
+
+# set paths for SPRFMO data
+onedrive2      <- "C:/Users/Martin/OneDrive - PFA/Documents/SPRFMO"
+data_path      <- file.path(onedrive2, "data submissions/Data submission 2021/CPUE")
+wg_path        <- file.path(onedrive2, "2021/Jack mackerel/04 Data/CPUE")
+prev_wg_path   <- file.path(onedrive2, "2021/Jack mackerel/04 Data/CPUE")
+
+# year settings
+fy <- 2008
+ly <- 2020
+ay <- 2021
+
+# Load the El Nino data  https://psl.noaa.gov/data/correlation/oni.data 
+elnino <- 
+  read_excel(path=file.path(data_path, "elnino 20210813.xlsx"), 
+             col_names = TRUE,
+             sheet="data") %>% 
+  lowcase() %>% 
+  gather(key=month, value=sst, m1:m12) %>% 
+  mutate(month = as.numeric(gsub("m","", month))) %>% 
+  filter(!is.na(sst)) %>% 
+  mutate(ELE   = 0, 
+         ELE   = ifelse(sst <= -0.5, -1, ELE),
+         ELE   = ifelse(sst >= 0.5 ,  1, ELE)) %>% 
+  arrange(year, month)
+
+# Load the Humbold Current Index (Easter Island-Antofagasta) http://www.bluewater.cl/HCI/HCI_v.csv
+
+hci <-
+  read.csv(file=file.path(data_path,"HCI_v 20210813.csv"), skip=2, header=TRUE) %>% 
+  lowcase() %>% 
+  filter(!is.na(hci))
+
+# Source the Offshore CPUE reader to read in all the CPUE data
+# NOTE: update with the right filename
+source("Offshore CPUE reader only from SPRFMO.r")
+
+# create offshore_all object with environmental data
+offshore_all <-
+  offshore_all %>% 
+  # get(load(file.path(data_path, "offshore_all_sprfmo 2021.RData"))) %>% 
+  left_join(elnino, by=c("year","month")) %>% 
+  left_join(hci, by=c("year","month")) %>% 
+  mutate(shootlon = ifelse(shootlon == 0, NA, shootlon),
+         shootlat = ifelse(shootlat == 0, NA, shootlat))
+
+# create cjm by hour (for CPUE analysis)
+cjm_byhour <-
+  offshore_all %>% 
+  filter(species  == "CJM") %>% 
+  filter(year %in% fy:ly) %>% 
+  
+  # remove very small (artificial) durations
+  filter(duration > 0.005) %>% 
+  
+  group_by (vesselcp, vesselcode2, shootdatetime, year, month, day, species) %>% 
+  summarize(catch    = sum(catch, na.rm=TRUE),
+            effort   = sum(duration, na.rm=TRUE),
+            shootlat = mean(shootlat, na.rm=TRUE),
+            shootlon = mean(shootlon, na.rm=TRUE),
+            sst      = mean(sst, na.rm=TRUE),
+            ELE      = mean(ELE, na.rm=TRUE),
+            hci      = mean(hci, na.rm=TRUE)) %>% 
+  mutate(catch        = round(catch),
+         lcatch      = log(catch + 0.1),
+         effort      = ifelse(!is.na(effort) & effort > 0, effort, NA),
+         cpue        = ifelse(!is.na(effort) & effort > 0, catch/effort, NA),
+         lcpue       = ifelse(!is.na(effort), log(catch/effort+0.1), NA)) %>% 
+  ungroup() %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
+  drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
+            "shootlat","shootlon","sst","ELE", "hci"))
+
+# cjm_byhour %>% filter(year == 2019) %>% View()
+
+# offshore_all %>% filter(vesselcp=="EU" & year == 2008) %>% count_not_na() # ggplot(aes(effort)) + geom_histogram()
+# offshore_all %>% filter(vesselcp=="EU" & year == 2008) %>% filter(is.na(duration)) %>% View()
+# cjm_byhour %>% ggplot(aes(effort)) + geom_histogram() + facet_wrap(~year)
+
+
+# cjm by day (for CPUE analysis)
+cjm_byday <-
+  
+  offshore_all %>% 
+  filter(species  == "CJM") %>% 
+  filter(year %in% fy:ly) %>% 
+  
+  group_by(vesselcp, vesselcode2, year, month, day, species) %>% 
+  summarize(catch    = sum(catch, na.rm=TRUE),
+            shootlat = mean(shootlat, na.rm=TRUE),
+            shootlon = mean(shootlon, na.rm=TRUE),
+            sst      = mean(sst, na.rm=TRUE),
+            ELE      = mean(ELE, na.rm=TRUE),
+            hci      = mean(hci, na.rm=TRUE)) %>% 
+  mutate(catch        = round(catch),
+         lcatch      = log(catch + 0.1),
+         effort      = 1,
+         cpue        = catch,
+         lcpue       = log(catch + 0.1)) %>% 
+  ungroup() %>% 
+  mutate_at(c("year","month", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
+  drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
+            "shootlat","shootlon","sst","ELE", "hci"))
+
+# cjm_byday %>% ggplot(aes(cpue)) + geom_histogram() + facet_wrap(~year)
+# offshore_all %>% filter(catch==0, vesselcp=="EU") %>% group_by(vesselcp, year) %>% summarize(n=n()) %>% View()
+# offshore_all %>% filter(catch==0, vesselcp=="EU") %>% group_by(vesselcp, year, vesselname) %>% summarize(n=n()) %>% View()
+# offshore_all %>% filter(catch==0, vesselcp=="EU", species=="CJM") %>%  View()
+
+# cjm by day (for CPUE analysis)
+cjm_byweek <-
+  offshore_all %>% 
+  filter(species == "CJM") %>% 
+  # filter(vesselcp != "KOR") %>% 
+  filter(year %in% (fy:ly)) %>% 
+  mutate(week        = week(shootdatetime)) %>% 
+  group_by(vesselcp, vesselcode2, year, month, week, species) %>% 
+  summarize(catch    = sum(catch, na.rm=TRUE),
+            effort   = as.numeric(n_distinct(day)),
+            shootlat = mean(shootlat, na.rm=TRUE),
+            shootlon = mean(shootlon, na.rm=TRUE),
+            sst      = mean(sst, na.rm=TRUE),
+            ELE      = mean(ELE, na.rm=TRUE),
+            hci      = mean(hci, na.rm=TRUE)) %>% 
+
+  ungroup() %>% 
+  mutate(efficiency = list(tibble(efficiency=c(0, 0.02, 0.025, 0.03, 0.035, 0.05)))) %>% 
+  unnest(efficiency) %>% 
+  mutate(effort = effort * (1 + efficiency)^(year - min(year, na.rm=TRUE))) %>% 
+
+  mutate(catch       = round(catch),
+         lcatch      = log(catch + 0.1),
+         cpue        = catch / effort, 
+         lcpue       = log(catch/effort + 0.1)) %>% 
+  ungroup() %>% 
+  filter(catch > 0) %>%            # if no catch during a week, this is suspicious ?? CHECK!
+  mutate(month = factor(month, levels=sort(unique(offshore_all$month)))) %>% 
+  mutate_at(c("year", "vesselcp", "vesselcode2","ELE"), list(as.factor)) %>% 
+  drop_na(c("vesselcp","vesselcode2","year","month","catch","effort","cpue",
+            "shootlat","shootlon","sst","ELE", "hci"))
+
+# Save data
+# save(offshore_all, cjm_byday, cjm_byhour, cjm_byweek, elnino, hci,
+#      file=file.path(data_path, "Offshore_all_data 2021.RData"))
+
+
+# Calculate means for the prediction variables
+mean_month <-
+  cjm_byday %>% 
+  group_by(month) %>% 
+  summarize(lcpue = mean(lcpue, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(lcpue2 = abs(lcpue - mean(lcpue, na.rm=TRUE))) %>% 
+  arrange(lcpue2) %>% 
+  filter(row_number() == 1)
+
+mean_vessel <-
+  cjm_byday %>% 
+  group_by(vesselcode2) %>% 
+  summarize(lcpue = mean(lcpue, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  mutate(lcpue2 = abs(lcpue - mean(lcpue, na.rm=TRUE))) %>% 
+  arrange(lcpue2) %>% 
+  filter(row_number() == 1)
+
+# Load the CPUE index calculated the previous year
+oldindex <-
+  # read.csv(file.path(prev_wg_path, "Offshore fleet standardized CPUE 2008-2019.csv"), stringsAsFactors = FALSE) %>% 
+  read.csv(file.path(prev_wg_path, "Offshore fleet standardized CPUE 2008-2020.csv"), stringsAsFactors = FALSE) %>% 
+  mutate(assessmentyear = as.character(assessmentyear))
+
+
+```
+
+JACK MACKEREL BENCHMARK WORKSHOP SCW14 
+
+Seattle, 4-8 July 2022
+
+WD02 
+
+**CPUE standardization for the offshore fleet taking into account increases in efficiency**
+
+Martin Pastoors, Niels Hintzen
+
+Corresponding author: mpastoors@pelagicfish.eu
+
+`r format(Sys.time(), '%d/%m/%Y')`
+
+
+**Abstract**
+
+Prior to 2018 two offshore CPUE series have been used in the assessment of Jack Mackerel: the standardized Chinese CPUE and the nominal offshore fleet CPUE (EU, Vanuatu, Korea, Russia). During the 2018 benchmark assessment, the nominal offshore CPUE has been converted into a standardized CPUE series, using GLM and GAM modelling. Since 2019, the standardized offshore CPUE also includes data from China. 
+
+A description of the data available for the analysis is presented. The final GAM model consists of a number of discrete factors (year, vessel, month and El Nino Effect) and a smoothed interaction between latitude and longitude. 
+
+This working document focuses on investigating the impacts of changes in fisheries efficiency on the standardized CPUE. Changes in fishing efficiency are important to take into account when using CPUE series as indicators of abundance. However, fishing efficiency is notoriously difficult to estimate in concrete cases. Therefore, the analysis has focused on exploring the potential consequences of different assumptions on technical efficiency creep of either zero, 2.5% or 5%.  
+
+
+<!--1. Introduction ------------------------------------------------------ -->
+
+# Introduction
+
+Prior to 2018 two offshore CPUE series have been used in the assessment of Jack Mackerel: the standardized Chinese CPUE and the nominal offshore fleet CPUE (EU, Vanuatu, Korea, Russia). During the 2018 benchmark assessment, the nominal offshore CPUE has been converted into a standardized CPUE series, using GLM and GAM modelling. 
+
+Fisheries efficiency creep is notoriously difficult to estimate in concrete cases, as there are many factors that may contribute to increases in efficiency, both in technical developments (gear, filaments, positioning equipment, sonars, echosounders etc) and in social developments (learning, communication, company strategies) that could lead to efficiency creep. Several recent papers have looked estimating generic increases in efficiency. Palomares and Pauly (2019), estimate an annual increase of 2.4%, Rousseau et al. (2019) estimate 2.6%, Eigaard et al. (2014) come to 3.2% and other authors suggest that efficiency creep may be as high as 5% (Galbraith et al 2017, Scherrer and Galbraith, 2020). We explored the effects of efficiency change by evaluating the impacts of 0%, 2%, 2.5%, 3%, 3.5% and 5%.  
+
+
+<!--2. Material and methods ------------------------------------------------------ -->
+
+# Material and methods
+
+Data from EU, Korea, Russia, Vanuatu and China was made available by the SPRFMO secretariat on 8th July 2021. Two vessels were removed from the dataset because of apparent problems with the units used for catch reporting. During 2020, due to the COVID pandemic, only Russia fished for Jack mackerel in the SPRFMO area.  
+
+Below, the summary information by year and contracting party is presented for: 
+
+* number of vessels participating in the fishery
+* number of fishing days
+* total catch of jack mackerel
+* mean catch per day
+
+```{r echo=FALSE,  message=FALSE, warning=FALSE}
+
+tab_nums(name    = "data_summary", 
+         caption = "Overview of the number of vessels, fishing days, Jack mackerel catch and catch per day by Contracting Party",
+         display = FALSE)
+
+offshore_all %>%
+  filter(species == "CJM") %>% 
+  group_by(vesselcp, year) %>% 
+  summarize(
+    nvessels    = n_distinct(vesselcode2),
+    fishingdays = n_distinct(paste(vesselcode2, day)),
+    catch       = sum(catch, na.rm=TRUE)
+  ) %>% 
+  mutate(
+    catch_day   = catch / fishingdays
+  ) %>% 
+  
+  pivot_longer(names_to = "variable", values_to="data", nvessels:catch_day) %>% 
+  mutate(variable = factor(variable, levels=c("nvessels","fishingdays", "catch", "catch_day"))) %>% 
+  
+  dcast(vesselcp + year ~ variable, value.var="data", sum, margins=c("vesselcp", "year")) %>% 
+  
+  mutate(catch_day = ifelse(grepl("all", year), NA, catch_day)) %>% 
+  mutate(nvessels = ifelse(grepl("all", year), NA, nvessels)) %>% 
+  
+  group_by(vesselcp) %>% 
+  do(add_row(., .after=0)) %>%    
+
+  pandoc.table(., 
+               style        = "simple",
+               split.tables = 100, 
+               split.cells  = c(rep(7,10)),
+               justify      = "right",
+               missing      =".",
+               big.mark     = ',', 
+               round        = c(0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0))
+
+```
+
+*`r tab_nums("data_summary")`*
+
+\newpage
+
+**Haul positions by contracting party and year**
+
+```{r echo=FALSE, fig.asp=1.0, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(name    = "haulpositionsbyyear", 
+         caption = "Haul positions where Jack mackerel has been caught (by year). Colours indicate the different contracting parties",
+         display = FALSE)
+
+invisible(gc())
+
+cjm_byhour %>% 
+  # offshore_all %>% 
+  # filter(species == "CJM") %>% 
+  filter(!is.na(shootlon) | !is.na(shootlat)) %>% 
+  filter(!is.na(year)) %>% 
+
+  ggplot(aes(x=shootlon, y=shootlat)) +
+  theme_publication() +
+  theme(axis.title       = element_blank(), 
+        text             = element_text(size=12),
+        legend.key.width = unit(1, "cm"),
+        panel.spacing    = unit(0.1, "lines") ) +  
+  
+  coord_quickmap(xlim=c(-120,-50) , ylim=c(-50,-10)) +
+  geom_polygon(data=world.df, aes(long,lat,group=group), 
+               fill="cornsilk", size=0.25,color="gray15", alpha=0.7) +
+  
+  geom_point(aes(colour=vesselcp), size=0.8, alpha=0.4) +
+  
+  ggtitle("CJM haul positions by year") +
+  labs(x="", y="") +
+  facet_wrap(~year, ncol=4)
+  # facet_grid(rows=vars(vesselcp), cols= vars(year), drop=FALSE)
+
+```
+
+*`r fig_nums("haulpositionsbyyear")`*
+
+\newpage
+
+**Jack mackerel Log CPUE by week and yearly average Log CPUE**
+
+The plot below shows the distributions of log CPUE by week and by contracting party. Log CPUE was calculated as the log of catch per week divided by the number of fishing days per week. The average log CPUE is drawn as a dashed black line. The colours indicate the different individual vessels that generated the CPUE. This shows that the trend in CPUE by individual vessel is largely consistent with the trend in CPUE by contracting party.     
+
+```{r echo=FALSE, fig.asp=1.2, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "lcpuebyweek", 
+  caption = "Jack mackerel log CPUE (log(catch / ndays)) by week.",
+  display = FALSE)
+
+invisible(gc())
+
+m <-
+  cjm_byweek %>% 
+  group_by(vesselcp, year) %>%
+  summarise(lcatch   = mean(lcpue, na.rm=TRUE), 
+            week     = mean(week, na.rm=TRUE)) %>% 
+  mutate(date = as.numeric(as.character(year)) + week/52) %>% 
+  data.frame() 
+
+# cjm_byweek %>%
+#   mutate(date   = as.numeric(as.character(year)) + week/52,
+#          lcatch = lcpue) %>%
+# 
+#   # mutate(date   = as.numeric(as.character(year)) + week/52,
+#   #        lcatch = log(catch + 0.1)) %>%
+#   
+#   ggplot(aes(date, lcatch)) +
+#   theme_publication() +
+#   # theme(legend.position="none")+
+#   geom_jitter(aes(colour=vesselcp)) +
+#   geom_line(data=m, aes(date, lcatch), colour="gray20", linetype="dashed", size=1) +
+#   geom_point(data=m, aes(date, lcatch)) +
+#   scale_x_continuous(breaks=seq(fy, ly, by = 2)) +
+#   facet_wrap(~vesselcp)
+
+# by vessel
+cjm_byweek %>%
+  mutate(date   = as.numeric(as.character(year)) + week/52,
+         lcatch = lcpue) %>%
+
+  # mutate(date   = as.numeric(as.character(year)) + week/52,
+  #        lcatch = log(catch + 0.1)) %>%
+  
+  ggplot(aes(date, lcatch)) +
+  theme_publication() +
+  theme(legend.position="none")+
+  geom_jitter(aes(colour=vesselcode2)) +
+  geom_line(data=m, aes(date, lcatch), colour="gray20", linetype="dashed", size=1) +
+  geom_point(data=m, aes(date, lcatch)) +
+  scale_x_continuous(breaks=seq(fy, ly, by = 2)) +
+  guides(colour = guide_legend(nrow = 3)) +
+  facet_wrap(~vesselcp, ncol=2)
+# cjm_byweek %>%
+#   mutate(date   = as.numeric(as.character(year)) + week/52,
+#          lcatch = lcpue) %>%
+#   filter(vesselcp=="EU") %>% 
+#   ggplot(aes(date, lcatch)) +
+#   theme_publication() +
+#   geom_jitter(aes(colour=vesselcode2)) +
+#   scale_x_continuous(breaks=seq(fy, ly, by = 2)) +
+#   facet_wrap(~vesselcode2)
+
+
+```
+
+*`r fig_nums("lcpuebyweek")`*
+
+\newpage
+
+**El Nino effect and Humbold_current index**
+
+It has been hypothesized that the catch rate of jack mackerel by area and season could be dependent on the climatic situation, characterized by El Nino events (NOAA,  https://www.esrl.noaa.gov/psd/data/correlation/oni.data) or the Humboldt Current Index (http://www.bluewater.cl/HCI/)
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "elnino", 
+  caption = "El Nino temperature anomaly (blue line) and ELE indicator (red line). Humboldt Current Index (green line)",
+  display = FALSE)
+
+invisible(gc())
+
+elnino %>% 
+  left_join(hci, by=c("year","month")) %>% 
+  mutate(date = year + (month-1)/12) %>% 
+  filter(year >= fy & year <= ly) %>% 
+  
+  ggplot(aes(date, sst) ) +
+  theme_publication() +
+  # theme(legend.position="none") +
+  geom_point(alpha=0.5, colour="blue") +
+  geom_line(colour="blue") +
+  geom_line(aes(y=ELE), colour="red") +
+  
+  geom_point(aes(y=hci), alpha=0.5, colour="green") +
+  geom_line(aes(y=hci), colour="green") +
+  geom_smooth(aes(y=hci), colour="green", span=0.2, se=FALSE) +
+  
+  scale_x_continuous(breaks = seq(fy, ly, by = 2)) 
+
+
+```
+
+*`r fig_nums("elnino")`*
+
+\newpage
+
+**Changes in efficiency**
+
+Changes in efficiency were explored in discrete steps of 0%, 2.5% and 5%. Efficiency changes were then incorporated into the measures of fishing effort (number of fishing days per fishing week and per vessel), using the formula: 
+
+$effort = effort * (1+efficiency)^{(y-fy)}$
+
+Where $y$ refers to year and $fy$ to the first year in the dataset. The resulting correction factor for fishing effort is shown in the plot below.   
+
+```{r echo=FALSE, fig.asp=0.7, fig.align="center", message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "efficiency", 
+  caption = "Impact of efficiency creep on the estimated fishing effort over time",
+  display = FALSE)
+
+invisible(gc())
+
+df <- data.frame(stringsAsFactors = FALSE)
+for (efficiency in c(0, 0.02, 0.025, 0.03, 0.035, 0.05)) {
+  df <-
+    bind_rows(
+      df,
+      data.frame(year=2008:2020, efficiency=efficiency) %>% 
+        mutate(index = (1+efficiency)^(year-min(year)))
+    )
+}
+
+df %>% 
+  ggplot(aes(year, index) ) +
+  theme_publication() +
+  # theme(legend.position="none") +
+  geom_point(aes(colour=factor(scales::percent(efficiency, accuracy=0.1)))) +
+  geom_line(aes(colour=factor(scales::percent(efficiency, accuracy=0.1))))  +
+  expand_limits(y=0) +
+  scale_x_continuous(breaks=seq(min(df$year), max(df$year), 2)) +
+  labs(colour="efficiency") +
+  guides(colour = guide_legend(nrow = 1))
+
+
+```
+
+*`r fig_nums("efficiency")`*
+
+\newpage
+
+# Results
+
+During the benchmark assessment 2018 (SCW6), the CPUE standardization method was based on first exploring different factors in a GLM model, and afterwards modelling the spatial interactions with splines in a GAM model. The catch per week is used as the variable to be explained and the log of effort (number of actual fishing days in each week) is used as the offset. The set of explanatory variables has been determined during the 2018 benchmark, using a stepwise approach. During SC9 (2021), a small change was carried through in the explanatory variables whereby the vessel was replace by the contracting party, in order to reduce the degrees of freedom:
+
+First the GLM version of the model: 
+
+*GLM: Catch ~ year + vesselcp + month + lat &ast; lon + ELE + offset(log(effort))* 
+
+```{r echo=FALSE, fig.align="center", fig.asp=0.6, message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "glm_results", 
+  caption = "GLM model results",
+  display = FALSE)
+
+# model formulation
+model_glm <- formula(paste("catch ~ year + vesselcp + month + shootlon*shootlat    + ELE + offset(log(effort))"))
+
+# years
+years <-
+  cjm_byweek %>%
+  filter(species == "CJM") %>% 
+  distinct(species, year) %>% 
+  arrange(species, year)
+
+# Get the unique variables for predictions
+temp <-
+  cjm_byweek %>%
+  na.omit() %>% 
+  tidyr::unite("newvar", c("vesselcp", "month", "shootlon", "shootlat", "ELE"), sep="/") %>%
+  group_by(species, efficiency, newvar) %>%
+  summarise(
+    n = n(), 
+    catch = sum(catch, na.rm=TRUE))  %>% 
+  group_by(species, efficiency) %>%
+  arrange(-catch) %>% 
+  group_by(species, efficiency) %>%
+  filter(row_number() == 1) %>% 
+  ungroup() %>% 
+  dplyr::select(-n, -catch) %>%
+  mutate(effort  = 7) %>% 
+  tidyr::separate(newvar, into=c("vesselcp", "month", "shootlon", "shootlat", "ELE"), sep="/") %>% 
+  mutate(across(c(shootlon, shootlat), as.numeric))
+
+# get the predictor dataset
+newdat <-
+  years %>% 
+  left_join(temp, by=c("species")) %>% 
+  group_by(species, efficiency) %>% 
+  summarise(data = list(tibble(vesselcp, month, shootlon, shootlat, ELE, effort, year)))
+
+# fit glm model
+x <-
+  cjm_byweek %>%
+  na.omit() %>%
+  group_by(species, efficiency) %>%
+  nest() %>%
+  summarise(
+    fit       = purrr::map(data, ~MASS::glm.nb(model_glm,  data = .x)),
+    tidied    = purrr::map(fit, broom::tidy),
+    augmented = purrr::map(fit, broom::augment)
+  ) %>%
+  # unnest(tidied) %>% View()
+
+  group_by(species, efficiency) %>%
+
+  # add the prediction data
+  left_join(newdat, by=c("species","efficiency")) %>%
+
+  # do the prediction
+  rowwise() %>%
+  mutate(pred =  list(
+                    data.frame(
+                      fit = predict(fit, newdata=unnest(data), se.fit=T, type="link")[c(1)],
+                      se  = predict(fit, newdata=unnest(data), se.fit=T, type="link")[c(2)]
+                    ) %>%
+                    setNames(c("pred","se")) %>%
+                    as.tibble())) %>%
+  ungroup()
+
+p <-
+  x %>%
+  dplyr::select(-fit, -augmented, -tidied) %>%
+  unnest(c(pred, data))  %>%
+  mutate(
+    est  = exp(pred),
+    upr  = exp(pred + (1.96 * se)),
+    lwr  = exp(pred - (1.96 * se))
+  )
+
+
+p %>% 
+  # filter(efficiency==0.025) %>% 
+  mutate(year = as.integer(as.character(year))) %>% 
+  ggplot(aes(x=year, y=est, group=efficiency)) +
+  theme_publication() +
+  geom_line(aes(colour=as.factor(scales::percent(efficiency, accuracy=0.1)))) +
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=as.factor(scales::percent(efficiency, accuracy=0.1))), alpha=0.2) +
+  expand_limits(y=0) +
+  scale_x_continuous(breaks=seq(min(ai(years$year)), max(ai(years$year)),2)) +
+  labs(x="",y="catch/week (tonnes)", title="GLM", fill="efficiency", colour="efficiency") +
+  guides(colour = guide_legend(nrow = 1)) +
+  facet_wrap(~species, scales="free_y")
+
+
+
+
+```
+*`r fig_nums("glm_results")`*
+
+\newpage
+
+**GAM version of the model**
+
+*GAM: Catch ~ year + vesselcp + month + s(lat-lon) + ELE + offset(log(effort))* 
+
+```{r echo=FALSE, fig.align="center", fig.asp=0.6, message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "gam_results", 
+  caption = "GAM model results",
+  display = FALSE)
+
+# model formulation
+model_glm <- formula(paste("catch ~ year + vesselcp + month + shootlon*shootlat    + ELE + offset(log(effort))"))
+model_gam <- formula(paste("catch ~ year + vesselcp + month + s(shootlon,shootlat) + ELE + offset(log(effort))"))
+
+# years
+years <-
+  cjm_byweek %>%
+  filter(species == "CJM") %>% 
+  distinct(species, year) %>% 
+  arrange(species, year)
+
+# Get the unique variables for predictions
+temp <-
+  cjm_byweek %>%
+  na.omit() %>% 
+  tidyr::unite("newvar", c("vesselcp", "month", "shootlon", "shootlat", "ELE"), sep="/") %>%
+  group_by(species, efficiency, newvar) %>%
+  summarise(
+    n = n(), 
+    catch = sum(catch, na.rm=TRUE))  %>% 
+  group_by(species, efficiency) %>%
+  arrange(-catch) %>% 
+  group_by(species, efficiency) %>%
+  filter(row_number() == 1) %>% 
+  ungroup() %>% 
+  dplyr::select(-n, -catch) %>%
+  mutate(effort  = 7) %>% 
+  tidyr::separate(newvar, into=c("vesselcp", "month", "shootlon", "shootlat", "ELE"), sep="/") %>% 
+  mutate(month = factor(month, levels=sort(unique(cjm_byweek$month)))) %>% 
+  mutate(across(c(shootlon, shootlat), as.numeric))
+
+# get the predictor dataset
+newdat <-
+  years %>% 
+  left_join(temp, by=c("species")) %>% 
+  group_by(species, efficiency) %>% 
+  summarise(data = list(tibble(vesselcp, month, shootlon, shootlat, ELE, effort, year)))
+
+
+# fit gam model
+x <-
+  cjm_byweek %>% 
+  na.omit() %>% 
+  group_by(species, efficiency) %>% 
+  nest() %>% 
+  summarise(
+    fit       = purrr::map(data, ~mgcv::gam(model_gam, 
+                                            data = .x, 
+                                            # family=nb())),
+                                            family=mgcv::negbin(MASS::glm.nb(model_glm, data=.x)$theta))),
+    tidied    = purrr::map(fit, broom::tidy),
+    augmented = purrr::map(fit, broom::augment)
+  ) %>% 
+  group_by(species, efficiency) %>% 
+  
+  # add the prediction data
+  left_join(newdat, by=c("species","efficiency")) %>% 
+  
+  # do the prediction
+  rowwise() %>% 
+  mutate(pred =  list(
+                    data.frame(
+                      fit = mgcv::predict.gam(fit, newdata=unnest(data), se.fit=T, type="link")[c(1)],
+                      se  = mgcv::predict.gam(fit, newdata=unnest(data), se.fit=T, type="link")[c(2)]
+                    ) %>% 
+                    setNames(c("pred","se")) %>% 
+                    mutate(
+                      est  = exp(pred),
+                      upr  = exp(pred + (1.96 * se)),
+                      lwr  = exp(pred - (1.96 * se))
+                    ) %>% 
+                    as.tibble())) %>% 
+  mutate(viz = list(mgcViz::getViz(fit))) %>% 
+  mutate(anova = list(anova(fit))) %>% 
+  mutate(aic   = AIC(fit)) %>% 
+  ungroup()
+
+p <-
+  x %>%
+  dplyr::select(species, efficiency, pred, data) %>%
+  unnest(c(pred, data))  
+
+p %>% 
+  mutate(year = as.integer(as.character(year))) %>% 
+  ggplot(aes(x=year, y=est, group=efficiency)) +
+  theme_publication() +
+  geom_line(aes(colour=as.factor(scales::percent(efficiency, accuracy=0.1)))) +
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=as.factor(scales::percent(efficiency, accuracy=0.1))), alpha=0.2) +
+  expand_limits(y=0) +
+  scale_x_continuous(breaks=seq(min(ai(years$year)), max(ai(years$year)),2)) +
+  labs(x="",y="catch/week (tonnes)", title="GAM", fill="efficiency", colour="efficiency") +
+  guides(colour = guide_legend(nrow = 1)) +
+  facet_wrap(~species, scales="free_y")
+
+
+# viz <- mgcViz::getViz(x[2,][["fit"]])[[1]]
+# viz <- x[3,][["viz"]][[1]]
+# print(plot(viz, allTerms = T, a.fact=FALSE), pages = 1)
+# o <- plot(sm(viz,1))
+# o +  geom_rug(inherit.aes = TRUE) 
+# qq(viz, method = "simul1", a.qqpoi = list("shape" = 1), a.ablin = list("linetype" = 2))
+# check(viz,
+#       # a.qq = list(method = "tnorm", 
+#       #             a.cipoly = list(fill = "light blue")), 
+#       a.respoi = list(size = 1.0), 
+#       a.hist = list(bins = 20))
+
+# n  <- 1e3
+# dat <- data.frame("x1" = rnorm(n), "x2" = rnorm(n), "x3" = rnorm(n))
+# dat$y <- with(dat, sin(x1) + 0.5*x2^2 + 0.2*x3 + pmax(x2, 0.2) * rnorm(n))
+# b <- gam(y ~ s(x1) + s(x2) + x3, data = dat, method = "REML")
+# b <- getViz(b)
+
+# o <- plot( sm(b, 1) )
+# o + l_fitLine(colour = "red") + l_rug(mapping = aes(x=x, y=y), alpha = 0.8) +
+#     l_ciLine(mul = 5, colour = "blue", linetype = 2) + 
+#     l_points(shape = 19, size = 1, alpha = 0.1) + theme_classic()
+
+# dat <- gamSim(1,n=1e3,dist="normal",scale=2)
+# dat$fac <- as.factor( sample(letters[1:6], nrow(dat), replace = TRUE) )
+# b <- gam(y~s(x0)+s(x1, x2)+s(x3)+fac, data=dat)
+# b <- getViz(b)
+# print(plot(b, allTerms = T), pages = 1) # Calls print.plotGam()
+# b
+# print(plot(viz, allTerms = T), pages = 1) # Calls print.plotGam()
+
+```
+
+*`r fig_nums("gam_results")`*
+
+\newpage
+
+**GAM Diagnostics**
+
+```{r echo=FALSE, fig.align="center", fig.asp=0.8, message=FALSE, warning=FALSE}
+
+fig_nums(
+  name    = "gam_diagnostics", 
+  caption = "GAM diagnostics",
+  display = FALSE)
+
+for (i in c(1,3,6)) {
+# for (i in 1:nrow(x)) {
+  print(paste("Efficiency", scales::percent(an(x[i,"efficiency"]), accuracy=0.1)))
+
+  # plot spatial smoothers
+  print(plot(sm(x[i,][["viz"]][[1]],1)) +  l_fitRaster() + l_fitContour() + l_points() + l_rug())
+
+  # plot parameters
+  print(plot(x[i,][["viz"]][[1]], allTerms = T, select=2:5), pages = 1)
+  
+  # plot diagnostics
+  print(check(x[i,][["viz"]][[1]], a.respoi = list(size = 1.0), a.hist = list(bins = 20)))
+  
+  # print anova
+  print(x[i,][["anova"]][[1]])
+
+}
+
+
+```
+
+
+*`r fig_nums("glm_diagnostics")`*
+
+\newpage
+
+*Comparison of standardized CPUE index without and with (2.5%) efficiency creep* 
+
+```{r echo=FALSE, fig.align="center", fig.asp=0.7, message=FALSE, warning=FALSE}
+
+tab_nums(
+  name    = "cpueindextable", 
+  caption = "GAM standardized offshore fleet CPUE for jack mackerel",
+  display = FALSE)
+
+df <-
+  x[x$efficiency==0.025,] %>% 
+  dplyr::select(species, efficiency, pred, data) %>% 
+  unnest(pred, data) %>% 
+  rename(cpue=est) %>% 
+  dplyr::select(species, efficiency, year, cpue, lwr, upr) %>% 
+  mutate(type="with eff. creep") %>% 
+  mutate(year = ai(year)) 
+  
+df %>% 
+  bind_rows(oldindex) %>% 
+  
+  ggplot(aes(x=year, y=cpue, group=type)) +
+  theme_publication() +
+  geom_ribbon(aes(ymin=lwr, ymax=upr, fill=factor(type)), alpha=0.2) +
+  geom_line(aes(colour=factor(type)), size=1) +
+  expand_limits(y=0) +
+  labs(y="cpue") +
+  scale_x_continuous(breaks= seq(fy,ly,1)) 
+
+
+
+# save to csv
+df %>% 
+  # filter(type=="standardized") %>% 
+  write.csv(file=file.path(wg_path, paste0("Offshore fleet standardized CPUE ",fy,"-",ly," with creep.csv")), 
+            row.names = FALSE)
+
+```
+
+*`r tab_nums("cpueindextable")`*
+
+
+<!--4. Discussion and conclusions ------------------------------------------------------ -->
+
+# Discussion and conclusions
+
+This working document describes the role of efficiency creep on the calculation of a standardized CPUE for the offshore fleets (China, EU, Korea, vanuatu and Russia) based on the haul-by-haul data contained in the SPRFMO database.  
+
+The modelling approach has been to use GAM models to assess the dependency on the weekly catch of jack mackerel on different variables. The same explanatory variables have been used as determined during the assessment of 2021. The GAM model consists of catch (per week) as the main variable, the year effect (as factor) as the main explanatory variable and the log of effort as the offset (the log is taken because of the log-link function). 
+
+Fisheries efficiency creep cannot be directly estimated in concrete cases like the jack mackerel fishery. There are many factors that may contribute to increases in efficiency, both in technical developments (gear, filaments, positioning equipment, sonars, echosounders etc) and in social developments (learning, communication, company strategies). Several recent papers have provided estimates of generic increases in efficiency at 2.4%, 2.6%, 3.4% and 5%. (Palomares and Pauly, 2019; Rousseau et al., 2019; Eigaard et al., 2014; Galbraith et al, 2017; Scherrer and Galbraith, 2020). We explored the effects of efficiency change by evaluating the impacts of 0%, 2%, 2.5%, 3%, 3.5% and 5%, and selected 2.5% as the base case to be put forward in the 2022 benchmark workshop.  
+
+
+<!--5. Acknowledgements ------------------------------------------------------ -->
+
+# Acknowledgements
+
+We would like to acknowledge the permission granted by the delegations of China, Russia, Vanuatu and Korea to utilize their haul-by-haul data for the analysis of standardized CPUE of the offshore fleet fishing for Jack mackerel. Sharing access to vessel data has made it possible to improve the indicator that can be used in the assessment. 
+
+<!--6. References ------------------------------------------------------ -->
+
+# References
+
+Galbraith, E. D., D. A. Carozza and D. Bianchi (2017). "A coupled human-Earth model perspective on long-term trends in the global marine fishery." Nature Communications 8.
+
+Li, G., X. Zou, X. Chen, Y. Zhou and M. Zhang (2013). "Standardization of CPUE for Chilean jack mackerel (Trachurus murphyi) from Chinese trawl fleets in the high seas of the Southeast Pacific Ocean." Journal of Ocean University of China 12(3): 441-451.
+
+Marchal, P. M., B. Andersen, B. Caillart, O. Eigaard, O. Guyader, H. Hovgaard, A. Iriondo, F. L. Fur, J. Sacchi and M. Santurtun (2007). "Impact of technological creep on fishing effort and fishing mortality, for a selection of European fleets." ICES journal of marine science 64(1): 192.
+
+Palomares, M. L. D. and D. Pauly (2019). "On the creeping increase of vessels' fishing power." Ecology and Society 24(3).
+
+Rousseau, Y., R. A. Watson, J. L. Blanchard and E. A. Fulton (2019). "Evolution of global marine fishing fleets and the response of fished resources." Proceedings of the National Academy of Sciences 116(25): 12238-12243.
+
+Scherrer, K. J. N. and E. D. Galbraith (2020). "The risk of underestimating long-term fisheries creep." Ecology and Society 25(1).
+
+SPRFMO (2011) Report of the Jack Mackerel Subgroup. Tenth Science Working Group of SPRFMO, 19 – 23 September 2011, Port Vila, Vanuatu.
+
+SPRFMO (2018) CPUE standardization for the offshore fleet fishing for Jack mackerel in the SPRFMO area (SCW6-Doc05). Sixth Science Committee Workshop, 28-30 May 2018, Valparaiso, Chile.
+
+SPRFMO (2021). Report of the 9th Scientific Committee Meeting, 27 September-3 October 2021.
