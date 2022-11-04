@@ -103,7 +103,7 @@ hci <-
 
 # Source the Offshore CPUE reader to read in all the CPUE data
 # NOTE: update with the right filename
-source("Offshore CPUE reader only from SPRFMO.r")
+source("Offshore CPUE reader only from SPRFMO v2021.r")
 
 # create offshore_all object with environmental data
 offshore_all <-

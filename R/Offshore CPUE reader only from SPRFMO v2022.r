@@ -45,7 +45,7 @@
 # Set filename for catch data
 # fn <- "Offshorefleets 20190801.xlsx"
 # fn <- "Offshorefleets 20200803.xlsx"
-fn <- "Offshorefleets 20210708.xlsx"
+# fn <- "Offshorefleets 20210708.xlsx"
 
 # -----------------------------------------------------------------------------------
 # read SPRFMO offshore dataset. 
@@ -63,7 +63,7 @@ offshore_all <-
   mutate  (file    = fn) %>%
   lowcase() %>% 
   rename(
-    vesselcallsign = callsign, 
+    # vesselcallsign = callsign, 
     vesselcode     = registrationnumber,
     vesselimo      = imonumber,
     vesselcountry  = flag,
@@ -114,9 +114,6 @@ offshore_all <-
   
   filter(!is.na(catch)) %>% 
   
-  # added during 2020
-  filter(validfishing == 1) %>% 
-  
   filter(!vesselcode %in% c("1704","9505073-6210008")) %>%    #remove vessels that have problem with units of catch
   
   filter(!grepl("alina|sirius", tolower(vesselname))) %>%    #remove vessels that have way too many zero hauls
@@ -140,7 +137,7 @@ offshore_all <-
                                           "maartje theadora") & year == 2008,
                         1000*catch, catch)) %>% 
   
-  dplyr::select(vesselname, vesselcountry, vesselcallsign, vesselcode, vesselimo, vesselcp, 
+  dplyr::select(vesselname, vesselcountry, vesselcode, vesselimo, vesselcp, 
                 shootdatetime, hauldatetime, duration, year, month, day, 
                 shootlat, shootlon, haullat, haullon, 
                 species, catch)
